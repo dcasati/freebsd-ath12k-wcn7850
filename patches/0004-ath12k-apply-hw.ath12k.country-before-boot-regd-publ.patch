@@ -1,7 +1,7 @@
-From 3813add9dde8298c04358a258a4e3204a59be834 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 20:57:18 -0600
-Subject: [PATCH 4/6] ath12k: apply hw.ath12k.country before boot regd
+Subject: [PATCH 4/8] ath12k: apply hw.ath12k.country before boot regd
  publication
 
 Strict LinuxKPI regulatory mode only accepts a byte-identical regd once
@@ -18,12 +18,12 @@ Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
  1 file changed, 34 insertions(+)
 
 diff --git a/sys/contrib/dev/athk/ath12k/mac.c b/sys/contrib/dev/athk/ath12k/mac.c
-index 2fc2a4db..36edb4ce 100644
+index 1aa8cbf5..7f192d1a 100644
 --- a/sys/contrib/dev/athk/ath12k/mac.c
 +++ b/sys/contrib/dev/athk/ath12k/mac.c
-@@ -44,6 +44,37 @@ void ath12k_mac_m4_cancel(struct ath12k_link_vif *arvif, const char *reason)
- }
- #endif
+@@ -24,6 +24,37 @@
+ #include "dp.h"
+ #include "dp_cmn.h"
  
 +#if defined(__FreeBSD__)
 +/* ISO 3166-1 alpha2 country applied before the boot-time regd is published. */
@@ -59,7 +59,7 @@ index 2fc2a4db..36edb4ce 100644
  #define CHAN2G(_channel, _freq, _flags) { \
  	.band                   = NL80211_BAND_2GHZ, \
  	.hw_value               = (_channel), \
-@@ -15052,6 +15083,9 @@ static int ath12k_mac_hw_register(struct ath12k_hw *ah)
+@@ -14810,6 +14841,9 @@ static int ath12k_mac_hw_register(struct ath12k_hw *ah)
  		wiphy->interface_modes &= ~BIT(NL80211_IFTYPE_MONITOR);
  
  	for_each_ar(ah, ar, i) {

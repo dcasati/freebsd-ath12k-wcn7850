@@ -1,7 +1,7 @@
-From 3c82847af3dd41f7138a54edf765d9d4dd284349 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 20:57:22 -0600
-Subject: [PATCH 6/6] tools: add rc.d script for ath12k wlan0 bring-up
+Subject: [PATCH 6/8] tools: add rc.d script for ath12k wlan0 bring-up
 
 rc.conf's wlans_<parent> parser rejects ath12k_wifi70, so create
 wlan0, run wpa_supplicant and dhclient from a dedicated rc script.

@@ -8,7 +8,7 @@ Status: station mode with WPA2-PSK works. Verified: unattended boot via rc.d, DH
 
 | Path | Contents |
 |------|----------|
-| `patches/0001-0009` | Patch series against freebsd-src `main` at `169e254b` (hardware-validated) |
+| `patches/0001-0008` | Patch series against freebsd-src `main` at `169e254b` (hardware-validated) |
 | `tools/ath12k_wlan.rc` | rc.d script that brings up `wlan0` at boot (also included in patch 0006) |
 
 ## Apply and build

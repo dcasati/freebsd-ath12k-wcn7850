@@ -1,7 +1,7 @@
-From 5be0d52bba778495847705754ecc980c986ff7e7 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 20:57:18 -0600
-Subject: [PATCH 5/6] LinuxKPI: keep NO_IR/DFS/indoor regulatory channels as
+Subject: [PATCH 5/8] LinuxKPI: keep NO_IR/DFS/indoor regulatory channels as
  passive
 
 The strict regulatory filter rejected any channel touched by a rule with
@@ -15,10 +15,10 @@ Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
  1 file changed, 17 insertions(+), 2 deletions(-)
 
 diff --git a/sys/compat/linuxkpi/common/src/linux_80211.c b/sys/compat/linuxkpi/common/src/linux_80211.c
-index 037fa02e..0d365044 100644
+index 5ae28a36..4c373ebd 100644
 --- a/sys/compat/linuxkpi/common/src/linux_80211.c
 +++ b/sys/compat/linuxkpi/common/src/linux_80211.c
-@@ -8589,6 +8589,7 @@ lkpi_regulatory_channel(const struct linuxkpi_ieee80211_regdomain *regd,
+@@ -8548,6 +8548,7 @@ lkpi_regulatory_channel(const struct linuxkpi_ieee80211_regdomain *regd,
  {
  	const struct ieee80211_reg_rule *rule;
  	int64_t low, high;
@@ -26,7 +26,7 @@ index 037fa02e..0d365044 100644
  	int i, power, gain;
  	bool covered, prohibited;
  
-@@ -8607,6 +8608,7 @@ lkpi_regulatory_channel(const struct linuxkpi_ieee80211_regdomain *regd,
+@@ -8566,6 +8567,7 @@ lkpi_regulatory_channel(const struct linuxkpi_ieee80211_regdomain *regd,
  	high = (int64_t)in->center_freq * 1000 + 10000;
  	power = in->max_power;
  	gain = 63;
@@ -34,7 +34,7 @@ index 037fa02e..0d365044 100644
  	covered = prohibited = false;
  	for (i = 0; i < regd->n_reg_rules; i++) {
  		rule = &regd->reg_rules[i];
-@@ -8617,8 +8619,19 @@ lkpi_regulatory_channel(const struct linuxkpi_ieee80211_regdomain *regd,
+@@ -8576,8 +8578,19 @@ lkpi_regulatory_channel(const struct linuxkpi_ieee80211_regdomain *regd,
  		if (rule->flags & ~(NL80211_RRF_AUTO_BW |
  		    NL80211_RRF_NO_HT40 | NL80211_RRF_NO_80MHZ |
  		    NL80211_RRF_NO_160MHZ | NL80211_RRF_NO_HE |
@@ -55,7 +55,7 @@ index 037fa02e..0d365044 100644
  		if (rule->freq_range.max_bandwidth_khz < 20000)
  			prohibited = true;
  		power = min(power, rule->power_rule.max_eirp / 100);
-@@ -8632,10 +8645,12 @@ lkpi_regulatory_channel(const struct linuxkpi_ieee80211_regdomain *regd,
+@@ -8591,10 +8604,12 @@ lkpi_regulatory_channel(const struct linuxkpi_ieee80211_regdomain *regd,
  	if (prohibited || power < 1 || power > 63 || gain < 0 || gain > 63 ||
  	    (in->flags & ~(IEEE80211_CHAN_NO_HT40 |
  	    IEEE80211_CHAN_NO_80MHZ | IEEE80211_CHAN_NO_160MHZ |
