@@ -1,0 +1,39 @@
+From a869d65d57ae6ae3159e5f5ab3fe75cb37071a71 Mon Sep 17 00:00:00 2001
+From: dcasati <dcasati@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 20:43:29 -0600
+Subject: [PATCH 3/6] ath12k: skip 6 GHz reg rebuild on authorize in strict
+ regulatory mode
+
+On ASSOC->AUTHORIZED the driver rebuilds the stored regulatory rules to
+pick a 6 GHz client power type.  Under lkpi_regulatory_strict any rule
+rebuild revokes TX terminally, so every successful connection lost TX.
+Strict station rules exclude 6 GHz; skip the rebuild as add_interface
+already does.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+---
+ sys/contrib/dev/athk/ath12k/mac.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/sys/contrib/dev/athk/ath12k/mac.c b/sys/contrib/dev/athk/ath12k/mac.c
+index 9b2507fb..2fc2a4db 100644
+--- a/sys/contrib/dev/athk/ath12k/mac.c
++++ b/sys/contrib/dev/athk/ath12k/mac.c
+@@ -7558,6 +7558,14 @@ static int ath12k_mac_handle_link_sta_state(struct ieee80211_hw *hw,
+ 		}
+ 
+ 		if (ath12k_wmi_supports_6ghz_cc_ext(ar) &&
++#ifdef __FreeBSD__
++		    /*
++		     * This rebuilds the stored rules only to pick 6 GHz client
++		     * power types; strict station rules exclude 6 GHz, and a
++		     * rebuild here would terminally revoke TX.
++		     */
++		    !hw->wiphy->lkpi_regulatory_strict &&
++#endif
+ 		    arvif->ahvif->vdev_type == WMI_VDEV_TYPE_STA) {
+ 			link_conf = ath12k_mac_get_link_bss_conf(arvif);
+ 			reg_info = ab->reg_info[ar->pdev_idx];
+-- 
+2.56.0
+

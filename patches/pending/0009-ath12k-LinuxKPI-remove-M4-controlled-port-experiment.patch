@@ -1,0 +1,2344 @@
+From d4b0d69fdfde4ab6dbf118b5fae4dc3cf6fb35b0 Mon Sep 17 00:00:00 2001
+From: dcasati <dcasati@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 09:37:42 -0600
+Subject: [PATCH] ath12k/LinuxKPI: remove M4/controlled-port experiment code
+
+Drop the qwz_port_policy sysctl, M4 staging work, first_key_early,
+qwz_bootstrap, tx_de_stats and m4_after_keys knobs and their tests.
+The controlled port now opens only on an acknowledged M4, and
+ath12k_mac_set_key drains pending TX before installing the PTK.
+
+Built and unit-tested; not yet validated on WCN7850 hardware.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+---
+ .../linuxkpi/common/include/net/mac80211.h    |   2 -
+ sys/compat/linuxkpi/common/src/linux_80211.c  |  49 +--
+ .../linuxkpi/common/src/linux_80211_sta.h     |  25 +-
+ sys/contrib/dev/athk/ath12k/core.c            |  19 -
+ sys/contrib/dev/athk/ath12k/core.h            |  14 -
+ sys/contrib/dev/athk/ath12k/dp.c              |  46 ---
+ sys/contrib/dev/athk/ath12k/dp.h              |   1 -
+ sys/contrib/dev/athk/ath12k/dp_htt.c          | 108 -----
+ sys/contrib/dev/athk/ath12k/dp_htt.h          |   3 -
+ sys/contrib/dev/athk/ath12k/mac.c             | 250 +-----------
+ sys/contrib/dev/athk/ath12k/mac.h             |   4 -
+ sys/contrib/dev/athk/ath12k/wifi7/hw.c        | 100 -----
+ sys/contrib/dev/athk/ath12k/wifi7/hw.h        |   5 -
+ .../linuxkpi_wlan/station_key_order_test.py   | 378 ++---------------
+ .../linuxkpi_wlan/station_m4_stage_test.py    | 380 ------------------
+ .../linuxkpi_wlan/station_m4_token_test.py    | 151 +++++++
+ sys/tests/linuxkpi_wlan/station_port_test.c   |  56 +--
+ ...cy_test.py => station_port_worker_test.py} |  22 +-
+ .../linuxkpi_wlan/station_tx_de_stats_test.py | 227 -----------
+ 19 files changed, 219 insertions(+), 1621 deletions(-)
+ delete mode 100644 sys/tests/linuxkpi_wlan/station_m4_stage_test.py
+ create mode 100644 sys/tests/linuxkpi_wlan/station_m4_token_test.py
+ rename sys/tests/linuxkpi_wlan/{station_port_policy_test.py => station_port_worker_test.py} (91%)
+ delete mode 100644 sys/tests/linuxkpi_wlan/station_tx_de_stats_test.py
+
+diff --git a/sys/compat/linuxkpi/common/include/net/mac80211.h b/sys/compat/linuxkpi/common/include/net/mac80211.h
+index 5206a35a..3d91c6ec 100644
+--- a/sys/compat/linuxkpi/common/include/net/mac80211.h
++++ b/sys/compat/linuxkpi/common/include/net/mac80211.h
+@@ -1210,8 +1210,6 @@ bool linuxkpi_ieee80211_queue_stopped(struct ieee80211_hw *, int);
+ void linuxkpi_ieee80211_txq_schedule_start(struct ieee80211_hw *, uint8_t);
+ bool linuxkpi_ieee80211_sta_tx_permitted(struct ieee80211_hw *,
+     struct ieee80211_sta *, struct sk_buff *);
+-bool linuxkpi_ieee80211_sta_m4_current(struct ieee80211_hw *,
+-    struct sk_buff *, bool *);
+ struct ieee80211_txq *linuxkpi_ieee80211_next_txq(struct ieee80211_hw *, uint8_t);
+ void linuxkpi_ieee80211_schedule_txq(struct ieee80211_hw *,
+     struct ieee80211_txq *, bool);
+diff --git a/sys/compat/linuxkpi/common/src/linux_80211.c b/sys/compat/linuxkpi/common/src/linux_80211.c
+index 0d365044..4c373ebd 100644
+--- a/sys/compat/linuxkpi/common/src/linux_80211.c
++++ b/sys/compat/linuxkpi/common/src/linux_80211.c
+@@ -173,11 +173,6 @@ SYSCTL_BOOL(_compat_linuxkpi_80211, OID_AUTO, order_scanlist, CTLFLAG_RW,
+     &lkpi_order_scanlist, 0, "Enable LinuxKPI 802.11 scan list shuffeling");
+ 
+ #if defined(LKPI_80211_HW_CRYPTO)
+-static bool lkpi_qwz_port_policy = false;
+-SYSCTL_BOOL(_compat_linuxkpi_80211, OID_AUTO, qwz_port_policy, CTLFLAG_RW,
+-    &lkpi_qwz_port_policy, 0,
+-    "Experiment: omit initial WPA2 M4 ACK gate (latched on new association)");
+-
+ static bool lkpi_hwcrypto = false;
+ SYSCTL_BOOL(_compat_linuxkpi_80211, OID_AUTO, hw_crypto, CTLFLAG_RDTUN,
+     &lkpi_hwcrypto, 0, "Enable LinuxKPI 802.11 hardware crypto offload");
+@@ -1741,7 +1736,7 @@ lkpi_sta_port_task(void *arg, int pending __unused)
+ 	ready = lsta->state == IEEE80211_STA_AUTHORIZED &&
+ 	    epoch == lsta->port.epoch && lkpi_reg_tx_allowed(hw->wiphy) &&
+ 	    atomic_load_acq_int(&lsta->port_key_busy) == 0 &&
+-	    lkpi_sta_port_publish(&lsta->port);
++	    lkpi_sta_port_ready(&lsta->port);
+ 	atomic_store_rel_int(&lsta->port_open, ready);
+ 	LKPI_80211_LSTA_TXQ_UNLOCK(lsta);
+ 	if (!ready) {
+@@ -1793,7 +1788,7 @@ lkpi_sta_eapol(struct lkpi_sta *lsta, struct mbuf *m, bool rx,
+ }
+ 
+ static bool
+-lkpi_sta_m4_check(struct lkpi_sta *lsta, struct mbuf *m, bool *keys_ready)
++lkpi_sta_m4_check(struct lkpi_sta *lsta, struct mbuf *m)
+ {
+ 	struct lkpi_sta_m4 token;
+ 	struct m_tag *tag;
+@@ -1801,8 +1796,6 @@ lkpi_sta_m4_check(struct lkpi_sta *lsta, struct mbuf *m, bool *keys_ready)
+ 	int message;
+ 	bool matches;
+ 
+-	if (keys_ready != NULL)
+-		*keys_ready = false;
+ 	tag = m_tag_locate(m, MTAG_ABI_LKPI80211, LKPI80211_TAG_M4, NULL);
+ 	if (tag == NULL || tag->m_tag_len != sizeof(token) ||
+ 	    !lkpi_sta_eapol(lsta, m, false, 0, &message, &replay, NULL) ||
+@@ -1813,9 +1806,6 @@ lkpi_sta_m4_check(struct lkpi_sta *lsta, struct mbuf *m, bool *keys_ready)
+ 	matches = token.replay == replay &&
+ 	    lkpi_sta_port_current(&lsta->port, token.epoch, token.replay) &&
+ 	    atomic_load_acq_int(&lsta->port_key_busy) == 0;
+-	if (keys_ready != NULL)
+-		*keys_ready = matches && lsta->port.pairwise != 0 &&
+-		    lsta->port.group != 0;
+ 	LKPI_80211_LSTA_TXQ_UNLOCK(lsta);
+ 	return (matches);
+ }
+@@ -1920,41 +1910,10 @@ linuxkpi_ieee80211_sta_tx_permitted(struct ieee80211_hw *hw,
+ 	if (!lkpi_sta_tx_allowed(lsta, skb->m))
+ 		return (false);
+ 	if (m_tag_locate(m, MTAG_ABI_LKPI80211, LKPI80211_TAG_M4, NULL) != NULL)
+-		return (lkpi_sta_m4_check(lsta, m, NULL));
++		return (lkpi_sta_m4_check(lsta, m));
+ 	return (true);
+ }
+ 
+-/* Caller holds wiphy; key readiness deliberately does not imply M4 ACK. */
+-bool
+-linuxkpi_ieee80211_sta_m4_current(struct ieee80211_hw *hw,
+-    struct sk_buff *skb, bool *keys_ready)
+-{
+-	struct ieee80211_node *ni;
+-	struct lkpi_sta *lsta;
+-	struct lkpi_vif *lvif;
+-	struct mbuf *m;
+-
+-	lockdep_assert_wiphy(hw->wiphy);
+-	if (keys_ready != NULL)
+-		*keys_ready = false;
+-	if (skb == NULL || skb->m == NULL ||
+-	    !ieee80211_hw_check(hw, LKPI_STA_WPA2))
+-		return (false);
+-	m = skb->m;
+-	ni = m->m_pkthdr.PH_loc.ptr;
+-	if (ni == NULL || ni->ni_drv_data == NULL)
+-		return (false);
+-	lsta = ni->ni_drv_data;
+-	lvif = VAP_TO_LVIF(ni->ni_vap);
+-	if (lsta->hw != hw || !lkpi_sta_port_enabled(lsta) ||
+-	    !lsta->added_to_drv || lsta->state != IEEE80211_STA_ASSOC ||
+-	    lvif->lvif_bss != lsta || !lvif->lvif_bss_synched ||
+-	    ni->ni_vap->iv_state != IEEE80211_S_RUN ||
+-	    !LVIF_TO_VIF(lvif)->cfg.assoc || !lkpi_reg_tx_allowed(hw->wiphy))
+-		return (false);
+-	return (lkpi_sta_m4_check(lsta, m, keys_ready));
+-}
+-
+ static int
+ lkpi_sta_del_keys(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
+     struct lkpi_sta *lsta)
+@@ -3655,7 +3614,7 @@ lkpi_sta_assoc_to_run(struct ieee80211vap *vap, enum ieee80211_state nstate, int
+ 	}
+ 	if (lkpi_sta_port_enabled(lsta)) {
+ 		LKPI_80211_LSTA_TXQ_LOCK(lsta);
+-		lkpi_sta_port_init(&lsta->port, lkpi_qwz_port_policy);
++		lkpi_sta_port_reset(&lsta->port);
+ 		atomic_store_rel_int(&lsta->port_open, 0);
+ 		LKPI_80211_LSTA_TXQ_UNLOCK(lsta);
+ 		ni->ni_flags &= ~IEEE80211_NODE_AUTH;
+diff --git a/sys/compat/linuxkpi/common/src/linux_80211_sta.h b/sys/compat/linuxkpi/common/src/linux_80211_sta.h
+index 43221fc6..82e107d0 100644
+--- a/sys/compat/linuxkpi/common/src/linux_80211_sta.h
++++ b/sys/compat/linuxkpi/common/src/linux_80211_sta.h
+@@ -13,8 +13,7 @@
+  * WPA2-CCMP station policy, serialized by the lsta TXQ mutex. Observation of
+  * M3 is not authentication: only the supplicant validates its MIC. An ACKed
+  * matching M4, successful PTK/GTK+replay setup, and firmware authorization are
+- * required by default. The opt-in initial-exchange experiment omits only the
+- * ACK prerequisite; it never changes the recorded ACK or key proof.
++ * required before opening the controlled port.
+  */
+ struct lkpi_sta_port {
+ 	uint64_t replay;
+@@ -22,7 +21,6 @@ struct lkpi_sta_port {
+ 	uint32_t epoch;
+ 	uint8_t pairwise, group;
+ 	bool exchange, acked, failed;
+-	bool initial_no_ack, no_ack;
+ };
+ 
+ static inline void
+@@ -32,14 +30,6 @@ lkpi_sta_port_reset(struct lkpi_sta_port *p)
+ 	p->replay = 0;
+ 	p->pairwise = p->group = 0;
+ 	p->exchange = p->acked = p->failed = false;
+-	p->no_ack = false;
+-}
+-
+-static inline void
+-lkpi_sta_port_init(struct lkpi_sta_port *p, bool initial_no_ack)
+-{
+-	lkpi_sta_port_reset(p);
+-	p->initial_no_ack = initial_no_ack;
+ }
+ 
+ static inline bool
+@@ -60,7 +50,6 @@ lkpi_sta_port_m3(struct lkpi_sta_port *p, uint64_t replay, const uint8_t nonce[3
+ 		p->acked = false;
+ 	} else {
+ 		lkpi_sta_port_reset(p);
+-		p->no_ack = p->initial_no_ack;
+ 	}
+ 	for (i = 0; i < sizeof(p->anonce); i++)
+ 		p->anonce[i] = nonce[i];
+@@ -72,20 +61,10 @@ lkpi_sta_port_m3(struct lkpi_sta_port *p, uint64_t replay, const uint8_t nonce[3
+ static inline bool
+ lkpi_sta_port_ready(const struct lkpi_sta_port *p)
+ {
+-	return (p->exchange && (p->acked || p->no_ack) && !p->failed &&
++	return (p->exchange && p->acked && !p->failed &&
+ 	    p->pairwise != 0 && p->group != 0);
+ }
+ 
+-static inline bool
+-lkpi_sta_port_publish(struct lkpi_sta_port *p)
+-{
+-	if (!lkpi_sta_port_ready(p))
+-		return (false);
+-	/* A new pairwise exchange after publication uses the strict ACK gate. */
+-	p->initial_no_ack = false;
+-	return (true);
+-}
+-
+ static inline void
+ lkpi_sta_port_key(struct lkpi_sta_port *p, unsigned int slot,
+     bool pairwise, bool install, bool success)
+diff --git a/sys/contrib/dev/athk/ath12k/core.c b/sys/contrib/dev/athk/ath12k/core.c
+index 060735b3..5f9e9ec2 100644
+--- a/sys/contrib/dev/athk/ath12k/core.c
++++ b/sys/contrib/dev/athk/ath12k/core.c
+@@ -40,25 +40,6 @@ module_param_named(debug_mask, ath12k_debug_mask, uint, 0644);
+ MODULE_PARM_DESC(debug_mask, "Debugging mask");
+ EXPORT_SYMBOL(ath12k_debug_mask);
+ 
+-#ifdef __FreeBSD__
+-bool ath12k_first_key_early;
+-module_param_named(first_key_early, ath12k_first_key_early, bool, 0644);
+-MODULE_PARM_DESC(first_key_early,
+-    "Experimental first PTK installation before plaintext EAPOL completion");
+-bool ath12k_qwz_bootstrap;
+-module_param_named(qwz_bootstrap, ath12k_qwz_bootstrap, bool, 0644);
+-MODULE_PARM_DESC(qwz_bootstrap,
+-    "Experimental initial PTK/GTK and firmware readiness before M4 completion");
+-bool ath12k_tx_de_stats;
+-module_param_named(tx_de_stats, ath12k_tx_de_stats, bool, 0644);
+-MODULE_PARM_DESC(tx_de_stats,
+-    "Request firmware TX classification counters after CCMP group key installs");
+-bool ath12k_m4_after_keys;
+-module_param_named(m4_after_keys, ath12k_m4_after_keys, bool, 0644);
+-MODULE_PARM_DESC(m4_after_keys,
+-    "Experimental initial M4 staging until keys and authorization request complete");
+-#endif
+-
+ bool ath12k_ftm_mode;
+ module_param_named(ftm_mode, ath12k_ftm_mode, bool, 0444);
+ MODULE_PARM_DESC(ftm_mode, "Boots up in factory test mode");
+diff --git a/sys/contrib/dev/athk/ath12k/core.h b/sys/contrib/dev/athk/ath12k/core.h
+index 0a6d4225..10136dba 100644
+--- a/sys/contrib/dev/athk/ath12k/core.h
++++ b/sys/contrib/dev/athk/ath12k/core.h
+@@ -291,13 +291,6 @@ enum ath12k_hw_group_flags {
+ 	ATH12K_GROUP_FLAG_UNREGISTER,
+ };
+ 
+-#ifdef __FreeBSD__
+-extern bool ath12k_first_key_early;
+-extern bool ath12k_qwz_bootstrap;
+-extern bool ath12k_tx_de_stats;
+-extern bool ath12k_m4_after_keys;
+-#endif
+-
+ enum ath12k_dev_flags {
+ 	ATH12K_FLAG_CAC_RUNNING,
+ 	ATH12K_FLAG_CRASH_FLUSH,
+@@ -385,13 +378,6 @@ struct ath12k_link_vif {
+ 	u16 num_stations;
+ 	bool is_csa_in_progress;
+ 	struct wiphy_work bcn_tx_work;
+-#ifdef __FreeBSD__
+-	struct sk_buff *native_m4_skb;
+-	struct wiphy_delayed_work native_m4_work;
+-	unsigned long native_m4_deadline;
+-	bool native_m4_initial;
+-	bool native_m4_ready;
+-#endif
+ };
+ 
+ struct ath12k_vif {
+diff --git a/sys/contrib/dev/athk/ath12k/dp.c b/sys/contrib/dev/athk/ath12k/dp.c
+index 8fe8a025..64676879 100644
+--- a/sys/contrib/dev/athk/ath12k/dp.c
++++ b/sys/contrib/dev/athk/ath12k/dp.c
+@@ -93,52 +93,6 @@ void ath12k_dp_tx_resume(struct ath12k_base *ab)
+ 	spin_unlock_bh(&dp->native_lock);
+ }
+ 
+-#ifdef __FreeBSD__
+-bool ath12k_dp_tx_only_plain_eapol(struct ath12k_base *ab)
+-{
+-	struct ath12k_dp *dp = ath12k_ab_to_dp(ab);
+-	struct ath12k_tx_desc_info *desc;
+-	struct ieee80211_tx_info *info;
+-	struct ieee80211_hdr *hdr;
+-	struct sk_buff *skb;
+-	struct mbuf *m;
+-	bool pending = false;
+-	int i;
+-
+-	if (!dp || !READ_ONCE(dp->native_tx_paused) ||
+-	    READ_ONCE(dp->native_stopping) || READ_ONCE(dp->native_quarantined))
+-		return false;
+-
+-	/* Paused submitters cannot add descriptors; a completion removes its
+-	 * descriptor before freeing the skb, under the same pool lock.
+-	 */
+-	for (i = 0; i < ARRAY_SIZE(dp->tx_desc_used_list); i++) {
+-		spin_lock_bh(&dp->tx_desc_lock[i]);
+-		list_for_each_entry(desc, &dp->tx_desc_used_list[i], list) {
+-			skb = desc->skb;
+-			if (!skb || skb->len < sizeof(*hdr))
+-				goto unsafe;
+-			info = IEEE80211_SKB_CB(skb);
+-			hdr = (void *)skb->data;
+-			m = skb->m;
+-			if (!m || !(m->m_flags & M_EAPOL) ||
+-			    (info->flags & IEEE80211_TX_CTL_HW_80211_ENCAP) ||
+-			    (ATH12K_SKB_CB(skb)->flags &
+-			     (ATH12K_SKB_CIPHER_SET | ATH12K_SKB_HW_80211_ENCAP)) ||
+-			    ieee80211_has_protected(hdr->frame_control))
+-				goto unsafe;
+-			pending = true;
+-		}
+-		spin_unlock_bh(&dp->tx_desc_lock[i]);
+-	}
+-	return pending;
+-
+-unsafe:
+-	spin_unlock_bh(&dp->tx_desc_lock[i]);
+-	return false;
+-}
+-#endif
+-
+ int ath12k_dp_dma_quiesce(struct ath12k_base *ab)
+ {
+ #ifdef __FreeBSD__
+diff --git a/sys/contrib/dev/athk/ath12k/dp.h b/sys/contrib/dev/athk/ath12k/dp.h
+index 4e4b0c73..3bd8e7f5 100644
+--- a/sys/contrib/dev/athk/ath12k/dp.h
++++ b/sys/contrib/dev/athk/ath12k/dp.h
+@@ -605,7 +605,6 @@ bool ath12k_dp_dma_owned(struct ath12k_base *ab);
+  */
+ int ath12k_dp_tx_pause(struct ath12k_base *ab);
+ void ath12k_dp_tx_resume(struct ath12k_base *ab);
+-bool ath12k_dp_tx_only_plain_eapol(struct ath12k_base *ab);
+ 
+ static inline u32 ath12k_dp_arch_tx_get_vdev_bank_config(struct ath12k_dp *dp,
+ 							 struct ath12k_link_vif *arvif)
+diff --git a/sys/contrib/dev/athk/ath12k/dp_htt.c b/sys/contrib/dev/athk/ath12k/dp_htt.c
+index 76872f96..96e17c58 100644
+--- a/sys/contrib/dev/athk/ath12k/dp_htt.c
++++ b/sys/contrib/dev/athk/ath12k/dp_htt.c
+@@ -40,110 +40,6 @@ int ath12k_dp_htt_connect(struct ath12k_dp *dp)
+ 	return 0;
+ }
+ 
+-#ifdef __FreeBSD__
+-#define ATH12K_HTT_NATIVE_TX_DE_COOKIE 0x5458444500000008ULL
+-
+-static int
+-ath12k_htt_native_tx_de_parse(struct ath12k_base *ab, u16 tag, u16 len,
+-			    const void *ptr, void *data)
+-{
+-	char counters[512];
+-	size_t size, used = 0, i;
+-	__le32 value;
+-
+-	switch (tag) {
+-	case HTT_STATS_TX_DE_CMN_TAG:
+-		size = sizeof(struct ath12k_htt_tx_de_cmn_stats_tlv);
+-		break;
+-	case HTT_STATS_TX_DE_EAPOL_PACKETS_TAG:
+-		size = sizeof(struct ath12k_htt_tx_de_eapol_packets_stats_tlv);
+-		break;
+-	case HTT_STATS_TX_DE_CLASSIFY_FAILED_TAG:
+-		size = sizeof(struct ath12k_htt_tx_de_classify_failed_stats_tlv);
+-		break;
+-	case HTT_STATS_TX_DE_CLASSIFY_STATS_TAG:
+-		size = sizeof(struct ath12k_htt_tx_de_classify_stats_tlv);
+-		break;
+-	case HTT_STATS_TX_DE_CLASSIFY_STATUS_TAG:
+-		size = sizeof(struct ath12k_htt_tx_de_classify_status_stats_tlv);
+-		break;
+-	case HTT_STATS_TX_DE_ENQUEUE_PACKETS_TAG:
+-		size = sizeof(struct ath12k_htt_tx_de_enqueue_packets_stats_tlv);
+-		break;
+-	case HTT_STATS_TX_DE_ENQUEUE_DISCARD_TAG:
+-		size = sizeof(struct ath12k_htt_tx_de_enqueue_discard_stats_tlv);
+-		break;
+-	case HTT_STATS_TX_DE_COMPL_STATS_TAG:
+-		size = sizeof(struct ath12k_htt_tx_de_compl_stats_tlv);
+-		break;
+-	default:
+-		return 0;
+-	}
+-
+-	if (len < size) {
+-		*(int *)data = -EINVAL;
+-		return 0;
+-	}
+-	/* Only the known numeric prefix is safe to report, never other TLVs. */
+-	for (i = 0; i < size; i += sizeof(value)) {
+-		memcpy(&value, (const u8 *)ptr + i, sizeof(value));
+-		used += scnprintf(counters + used, sizeof(counters) - used,
+-				  "%s%u", i ? "," : "", le32_to_cpu(value));
+-	}
+-	ath12k_info(ab, "native TX_DE tag=%u counters=%s\n", tag, counters);
+-	return 0;
+-}
+-
+-static bool
+-ath12k_htt_native_tx_de_stats_handler(struct ath12k_base *ab, struct sk_buff *skb)
+-{
+-	const struct ath12k_htt_extd_stats_msg *msg;
+-	u32 info, len, status;
+-	int ret, parse_error = 0;
+-
+-	if (skb->len < sizeof(*msg)) {
+-		ath12k_warn(ab, "short native HTT stats response\n");
+-		return true;
+-	}
+-	msg = (const void *)skb->data;
+-	if (le64_to_cpu(msg->cookie) != ATH12K_HTT_NATIVE_TX_DE_COOKIE)
+-		return false;
+-	if (!READ_ONCE(ath12k_tx_de_stats))
+-		return true;
+-	info = le32_to_cpu(msg->info1);
+-	status = (info >> 8) & 7;
+-	len = u32_get_bits(info, ATH12K_HTT_T2H_EXT_STATS_INFO1_LENGTH);
+-	if ((info & 0xff) != ATH12K_DBG_HTT_EXT_STATS_TX_DE_INFO ||
+-	    status > 1 || len > skb->len - sizeof(*msg)) {
+-		ath12k_warn(ab, "invalid native TX_DE response status=%u length=%u\n",
+-			    status, len);
+-		return true;
+-	}
+-	ath12k_info(ab, "native TX_DE response status=%u done=%u bytes=%u\n",
+-		    status, !!(info & ATH12K_HTT_T2H_EXT_STATS_INFO1_DONE), len);
+-	ret = ath12k_dp_htt_tlv_iter(ab, msg->data, len,
+-				     ath12k_htt_native_tx_de_parse, &parse_error);
+-	if (ret || parse_error)
+-		ath12k_warn(ab, "invalid native TX_DE TLVs: %d\n",
+-			    ret ? ret : parse_error);
+-	return true;
+-}
+-
+-void ath12k_dp_htt_native_tx_de_stats_request(struct ath12k *ar)
+-{
+-	struct htt_ext_stats_cfg_params cfg = {};
+-	int ret;
+-
+-	ret = ath12k_dp_tx_htt_h2t_ext_stats_req(ar,
+-				ATH12K_DBG_HTT_EXT_STATS_TX_DE_INFO, &cfg,
+-				ATH12K_HTT_NATIVE_TX_DE_COOKIE);
+-	if (ret)
+-		ath12k_warn(ar->ab, "native TX_DE request failed: %d\n", ret);
+-	else
+-		ath12k_info(ar->ab, "native TX_DE requested\n");
+-}
+-#endif
+-
+ static int ath12k_get_ppdu_user_index(struct htt_ppdu_stats *ppdu_stats,
+ 				      u16 peer_id)
+ {
+@@ -763,10 +659,6 @@ void ath12k_dp_htt_htc_t2h_msg_handler(struct ath12k_base *ab,
+ 		ath12k_htt_pull_ppdu_stats(ab, skb);
+ 		break;
+ 	case HTT_T2H_MSG_TYPE_EXT_STATS_CONF:
+-#ifdef __FreeBSD__
+-		if (ath12k_htt_native_tx_de_stats_handler(ab, skb))
+-			break;
+-#endif
+ 		ath12k_debugfs_htt_ext_stats_handler(ab, skb);
+ 		break;
+ 	case HTT_T2H_MSG_TYPE_MLO_TIMESTAMP_OFFSET_IND:
+diff --git a/sys/contrib/dev/athk/ath12k/dp_htt.h b/sys/contrib/dev/athk/ath12k/dp_htt.h
+index c3a9d831..6020e632 100644
+--- a/sys/contrib/dev/athk/ath12k/dp_htt.h
++++ b/sys/contrib/dev/athk/ath12k/dp_htt.h
+@@ -1543,7 +1543,4 @@ int ath12k_dp_tx_htt_tx_filter_setup(struct ath12k_base *ab, u32 ring_id,
+ 				     int tx_buf_size,
+ 				     struct htt_tx_ring_tlv_filter *htt_tlv_filter);
+ int ath12k_dp_tx_htt_monitor_mode_ring_config(struct ath12k *ar, bool reset);
+-#ifdef __FreeBSD__
+-void ath12k_dp_htt_native_tx_de_stats_request(struct ath12k *ar);
+-#endif
+ #endif
+diff --git a/sys/contrib/dev/athk/ath12k/mac.c b/sys/contrib/dev/athk/ath12k/mac.c
+index 36edb4ce..7f192d1a 100644
+--- a/sys/contrib/dev/athk/ath12k/mac.c
++++ b/sys/contrib/dev/athk/ath12k/mac.c
+@@ -23,26 +23,6 @@
+ #include "debugfs_sta.h"
+ #include "dp.h"
+ #include "dp_cmn.h"
+-#ifdef __FreeBSD__
+-#include "wifi7/hw.h"
+-
+-void ath12k_mac_m4_cancel(struct ath12k_link_vif *arvif, const char *reason)
+-{
+-	struct ieee80211_hw *hw = arvif->ahvif->ah->hw;
+-	struct sk_buff *skb = arvif->native_m4_skb;
+-
+-	lockdep_assert_wiphy(hw->wiphy);
+-	wiphy_delayed_work_cancel(hw->wiphy, &arvif->native_m4_work);
+-	arvif->native_m4_skb = NULL;
+-	arvif->native_m4_deadline = 0;
+-	arvif->native_m4_ready = false;
+-	if (skb) {
+-		ath12k_warn(arvif->ahvif->ah, "experimental M4 discarded (%s)\n",
+-			    reason);
+-		ieee80211_free_txskb(hw, skb);
+-	}
+-}
+-#endif
+ 
+ #if defined(__FreeBSD__)
+ /* ISO 3166-1 alpha2 country applied before the boot-time regd is published. */
+@@ -3992,12 +3972,6 @@ static void ath12k_bss_assoc(struct ath12k *ar,
+ 
+ 	arvif->is_up = true;
+ 	arvif->rekey_data.enable_offload = false;
+-#ifdef __FreeBSD__
+-	ath12k_mac_m4_cancel(arvif, "new association");
+-	arvif->native_m4_initial = READ_ONCE(ath12k_m4_after_keys) &&
+-	    ar->ab->hw_rev == ATH12K_HW_WCN7850_HW20 &&
+-	    ieee80211_hw_check(ath12k_ar_to_hw(ar), LKPI_STA_WPA2);
+-#endif
+ 
+ 	ath12k_dbg(ar->ab, ATH12K_DBG_MAC,
+ 		   "mac vdev %d up (associated) bssid %pM aid %d\n",
+@@ -4043,10 +4017,6 @@ static void ath12k_bss_disassoc(struct ath12k *ar,
+ 
+ 	ath12k_dbg(ar->ab, ATH12K_DBG_MAC, "mac vdev %i disassoc bssid %pM\n",
+ 		   arvif->vdev_id, arvif->bssid);
+-#ifdef __FreeBSD__
+-	ath12k_mac_m4_cancel(arvif, "disassociation");
+-	arvif->native_m4_initial = false;
+-#endif
+ 
+ 	ret = ath12k_wmi_vdev_down(ar, arvif->vdev_id);
+ 	if (ret)
+@@ -4196,9 +4166,6 @@ static void ath12k_mac_init_arvif(struct ath12k_vif *ahvif,
+ 	INIT_DELAYED_WORK(&arvif->connection_loss_work,
+ 			  ath12k_mac_vif_sta_connection_loss_work);
+ 	wiphy_work_init(&arvif->bcn_tx_work, ath12k_mac_bcn_tx_work);
+-#ifdef __FreeBSD__
+-	wiphy_delayed_work_init(&arvif->native_m4_work, ath12k_wifi7_m4_work);
+-#endif
+ 
+ 	arvif->num_stations = 0;
+ 
+@@ -4239,10 +4206,6 @@ static void ath12k_mac_remove_link_interface(struct ieee80211_hw *hw,
+ 
+ 	cancel_delayed_work_sync(&arvif->connection_loss_work);
+ 	wiphy_work_cancel(ath12k_ar_to_hw(ar)->wiphy, &arvif->bcn_tx_work);
+-#ifdef __FreeBSD__
+-	ath12k_mac_m4_cancel(arvif, "interface removal");
+-	arvif->native_m4_initial = false;
+-#endif
+ 
+ 	ath12k_dbg(ar->ab, ATH12K_DBG_MAC, "mac remove link interface (vdev %d link id %d)",
+ 		   arvif->vdev_id, arvif->link_id);
+@@ -6175,217 +6138,28 @@ static int ath12k_mac_set_key_locked(struct ath12k *ar, enum set_key_cmd cmd,
+ 	return ret;
+ }
+ 
+-#ifdef __FreeBSD__
+-static bool ath12k_mac_qwz_initial_key(struct ath12k *ar, enum set_key_cmd cmd,
+-				     struct ath12k_link_vif *arvif,
+-				     struct ath12k_link_sta *arsta,
+-				     struct ieee80211_key_conf *key)
+-{
+-	struct ath12k_dp *dp = ath12k_ab_to_dp(ar->ab);
+-	struct ath12k_dp_link_peer *peer;
+-	struct ieee80211_key_conf *installed;
+-	const u8 *peer_addr = arsta ? arsta->addr : arvif->bssid;
+-	bool pairwise = key->flags & IEEE80211_KEY_FLAG_PAIRWISE;
+-	bool initial = true;
+-	int count = 0;
+-	int i;
+-
+-	if ((!ath12k_qwz_bootstrap &&
+-	     !(READ_ONCE(ath12k_m4_after_keys) && arvif->native_m4_initial)) ||
+-	    cmd != SET_KEY || (!arsta && pairwise) ||
+-	    arvif->ahvif->vdev_type != WMI_VDEV_TYPE_STA || !arvif->is_up ||
+-	    key->cipher != WLAN_CIPHER_SUITE_CCMP || key->keylen != 16 ||
+-	    (pairwise ? key->keyidx != 0 : key->keyidx == 0) ||
+-	    key->keyidx >= 4 || atomic_read(&ar->num_pending_mgmt_tx))
+-		return false;
+-
+-	spin_lock_bh(&dp->dp_lock);
+-	peer = ath12k_dp_link_peer_find_by_vdev_and_addr(dp, arvif->vdev_id,
+-						      peer_addr);
+-	if (!peer || !peer->dp_peer || peer->is_authorized)
+-		initial = false;
+-	else {
+-		for (i = 0; i < ARRAY_SIZE(peer->dp_peer->keys); i++) {
+-			installed = peer->dp_peer->keys[i];
+-			if (!installed)
+-				continue;
+-			count++;
+-			if (installed->cipher != WLAN_CIPHER_SUITE_CCMP ||
+-			    installed->keylen != 16 || i == key->keyidx ||
+-			    !(installed->flags & IEEE80211_KEY_FLAG_PAIRWISE) ||
+-			    installed->keyidx != 0)
+-				initial = false;
+-		}
+-		initial &= pairwise ? count == 0 && !arvif->pairwise_key_done :
+-				     count == 1 && arvif->pairwise_key_done;
+-	}
+-	spin_unlock_bh(&dp->dp_lock);
+-	return initial;
+-}
+-
+-static int ath12k_mac_qwz_peer_ready(struct ath12k *ar,
+-				    struct ath12k_link_vif *arvif,
+-				    struct ath12k_link_sta *arsta)
+-{
+-	struct ath12k_dp *dp = ath12k_ab_to_dp(ar->ab);
+-	struct ath12k_dp_link_peer *peer;
+-	struct ieee80211_key_conf *key;
+-	const u8 *peer_addr = arsta ? arsta->addr : arvif->bssid;
+-	bool pairwise = false, group = false;
+-	int ret;
+-	int i;
+-
+-	if ((!ath12k_qwz_bootstrap &&
+-	     !(READ_ONCE(ath12k_m4_after_keys) && arvif->native_m4_initial)) ||
+-	    !arvif->is_up ||
+-	    !arvif->pairwise_key_done)
+-		return 0;
+-	spin_lock_bh(&dp->dp_lock);
+-	peer = ath12k_dp_link_peer_find_by_vdev_and_addr(dp, arvif->vdev_id,
+-						      peer_addr);
+-	if (peer && peer->dp_peer && !peer->is_authorized) {
+-		for (i = 0; i < ARRAY_SIZE(peer->dp_peer->keys); i++) {
+-			key = peer->dp_peer->keys[i];
+-			if (!key || key->cipher != WLAN_CIPHER_SUITE_CCMP ||
+-			    key->keylen != 16)
+-				continue;
+-			if (key->flags & IEEE80211_KEY_FLAG_PAIRWISE)
+-				pairwise |= key->keyidx == 0;
+-			else
+-				group |= key->keyidx > 0 && key->keyidx < 4;
+-		}
+-	}
+-	spin_unlock_bh(&dp->dp_lock);
+-	if (!pairwise || !group)
+-		return 0;
+-
+-	/* This submits authorization; it is not a firmware ACK or host-port proof. */
+-	ret = ath12k_wmi_set_peer_param(ar, peer_addr, arvif->vdev_id,
+-				      WMI_PEER_AUTHORIZE, 1);
+-	if (ret) {
+-		ath12k_warn(ar->ab, "experimental bootstrap authorization failed: %d\n",
+-			    ret);
+-		return ret;
+-	}
+-	spin_lock_bh(&dp->dp_lock);
+-	peer = ath12k_dp_link_peer_find_by_vdev_and_addr(dp, arvif->vdev_id,
+-						      peer_addr);
+-	if (peer)
+-		peer->is_authorized = true;
+-	spin_unlock_bh(&dp->dp_lock);
+-	if (!peer) {
+-		ath12k_warn(ar->ab, "bootstrap peer disappeared after authorization\n");
+-		return -ENOENT;
+-	}
+-	return 1;
+-}
+-
+-static bool ath12k_mac_first_key_early(struct ath12k *ar, enum set_key_cmd cmd,
+-				     struct ath12k_link_vif *arvif,
+-				     struct ath12k_link_sta *arsta,
+-				     struct ieee80211_key_conf *key)
+-{
+-	struct ath12k_dp *dp = ath12k_ab_to_dp(ar->ab);
+-	struct ath12k_dp_link_peer *peer;
+-	bool first = true;
+-
+-	if (!ath12k_first_key_early || cmd != SET_KEY || !arsta ||
+-	    arvif->ahvif->vdev_type != WMI_VDEV_TYPE_STA ||
+-	    arvif->pairwise_key_done || !(key->flags & IEEE80211_KEY_FLAG_PAIRWISE) ||
+-	    atomic_read(&ar->num_pending_mgmt_tx))
+-		return false;
+-	spin_lock_bh(&dp->dp_lock);
+-	peer = ath12k_dp_link_peer_find_by_vdev_and_addr(dp, arvif->vdev_id,
+-						      arsta->addr);
+-	if (!peer || !peer->dp_peer)
+-		first = false;
+-	else {
+-		for (int i = 0; i < ARRAY_SIZE(peer->dp_peer->keys); i++) {
+-			if (peer->dp_peer->keys[i]) {
+-				first = false;
+-				break;
+-			}
+-		}
+-	}
+-	spin_unlock_bh(&dp->dp_lock);
+-	return first && ath12k_dp_tx_only_plain_eapol(ar->ab);
+-}
+-#endif
+-
+ static int ath12k_mac_set_key(struct ath12k *ar, enum set_key_cmd cmd,
+ 			      struct ath12k_link_vif *arvif,
+ 			      struct ath12k_link_sta *arsta,
+ 			      struct ieee80211_key_conf *key)
+ {
+ #ifdef __FreeBSD__
+-	bool bootstrap, staging;
+-	int ret, ready;
++	int ret;
+ 
+ 	if (ieee80211_hw_check(ath12k_ar_to_hw(ar), LKPI_STA_WPA2)) {
+ 		/*
+ 		 * LKPI has already closed the controlled port. Drain both TX
+ 		 * entries still mapping and frames already owned by firmware
+-		 * before changing a key. Initial-key experiments can skip only
+-		 * plaintext EAPOL completion; protected traffic still drains.
++		 * before changing a key.
+ 		 */
+-		staging = READ_ONCE(ath12k_m4_after_keys) &&
+-		    arvif->native_m4_initial;
+-		if (arvif->native_m4_initial && !staging) {
+-			ath12k_mac_m4_cancel(arvif, "disabled");
+-			arvif->native_m4_initial = false;
+-		}
+ 		ret = ath12k_dp_tx_pause(ar->ab);
+-		if (ret) {
+-			if (staging) {
+-				ath12k_mac_m4_cancel(arvif, "TX pause failure");
+-				arvif->native_m4_initial = false;
+-			}
++		if (ret)
+ 			return ret;
+-		}
+-		bootstrap = ath12k_mac_qwz_initial_key(ar, cmd, arvif, arsta, key);
+-		if (arvif->native_m4_initial && !bootstrap) {
+-			ath12k_mac_m4_cancel(arvif, "non-initial key");
+-			arvif->native_m4_initial = false;
+-			staging = false;
+-		}
+-		if (!staging &&
+-		    ((ath12k_qwz_bootstrap && bootstrap &&
+-		      ath12k_dp_tx_only_plain_eapol(ar->ab)) ||
+-		     ath12k_mac_first_key_early(ar, cmd, arvif, arsta, key)))
+-			ret = 0;
+-		else
+-			ret = ath12k_mac_wait_tx_complete(ar);
++		ret = ath12k_mac_wait_tx_complete(ar);
+ 		if (!ret)
+ 			ret = ath12k_mac_set_key_locked(ar, cmd, arvif, arsta, key);
+-		if (!ret && bootstrap) {
+-			/* The installed key is now owned by the peer. An optional
+-			 * readiness failure must not make LKPI free that key.
+-			 */
+-			ready = ath12k_mac_qwz_peer_ready(ar, arvif, arsta);
+-			if (staging) {
+-				if (ready < 0) {
+-					ath12k_mac_m4_cancel(arvif,
+-							    "authorization request failure");
+-					arvif->native_m4_initial = false;
+-				} else if (ready > 0) {
+-					arvif->native_m4_ready = true;
+-				}
+-			}
+-		}
+-		if (ret && staging) {
+-			ath12k_mac_m4_cancel(arvif, "key or replay setup failure");
+-			arvif->native_m4_initial = false;
+-		}
+ 		/* A failed key keeps the host port closed; EAPOL may recover. */
+ 		ath12k_dp_tx_resume(ar->ab);
+-		if (arvif->native_m4_skb && arvif->native_m4_ready)
+-			wiphy_delayed_work_queue(ath12k_ar_to_hw(ar)->wiphy,
+-						&arvif->native_m4_work, 0);
+-		if (!ret && READ_ONCE(ath12k_tx_de_stats) && cmd == SET_KEY &&
+-		    arvif->ahvif->vdev_type == WMI_VDEV_TYPE_STA &&
+-		    key->cipher == WLAN_CIPHER_SUITE_CCMP &&
+-		    !(key->flags & IEEE80211_KEY_FLAG_PAIRWISE))
+-			ath12k_dp_htt_native_tx_de_stats_request(ar);
+ 		return ret;
+ 	}
+ #endif
+@@ -6848,10 +6622,6 @@ static int ath12k_mac_station_disassoc(struct ath12k *ar,
+ 	struct ieee80211_sta *sta = ath12k_ahsta_to_sta(arsta->ahsta);
+ 
+ 	lockdep_assert_wiphy(ath12k_ar_to_hw(ar)->wiphy);
+-#ifdef __FreeBSD__
+-	ath12k_mac_m4_cancel(arvif, "station disassociation");
+-	arvif->native_m4_initial = false;
+-#endif
+ 
+ 	if (!sta->wme) {
+ 		arvif->num_legacy_stations--;
+@@ -7299,10 +7069,6 @@ static int ath12k_mac_station_remove(struct ath12k *ar,
+ 	struct ath12k_link_sta *temp_arsta;
+ 
+ 	lockdep_assert_wiphy(ath12k_ar_to_hw(ar)->wiphy);
+-#ifdef __FreeBSD__
+-	ath12k_mac_m4_cancel(arvif, "station removal");
+-	arvif->native_m4_initial = false;
+-#endif
+ 
+ 	wiphy_work_cancel(ar->ah->hw->wiphy, &arsta->update_wk);
+ 
+@@ -11076,10 +10842,6 @@ static int ath12k_mac_vdev_delete(struct ath12k *ar, struct ath12k_link_vif *arv
+ 	int ret;
+ 
+ 	lockdep_assert_wiphy(ath12k_ar_to_hw(ar)->wiphy);
+-#ifdef __FreeBSD__
+-	ath12k_mac_m4_cancel(arvif, "vdev deletion");
+-	arvif->native_m4_initial = false;
+-#endif
+ 
+ 	reinit_completion(&ar->vdev_delete_done);
+ 
+@@ -12522,10 +12284,6 @@ ath12k_mac_op_unassign_vif_chanctx(struct ieee80211_hw *hw,
+ 	if (!arvif || !arvif->is_created)
+ 		return;
+ 
+-#ifdef __FreeBSD__
+-	ath12k_mac_m4_cancel(arvif, "channel unassignment");
+-	arvif->native_m4_initial = false;
+-#endif
+ 	ar = arvif->ar;
+ 	ab = ar->ab;
+ 
+diff --git a/sys/contrib/dev/athk/ath12k/mac.h b/sys/contrib/dev/athk/ath12k/mac.h
+index 8c0f97e1..7b50c597 100644
+--- a/sys/contrib/dev/athk/ath12k/mac.h
++++ b/sys/contrib/dev/athk/ath12k/mac.h
+@@ -16,10 +16,6 @@ struct ath12k_base;
+ struct ath12k_hw;
+ struct ath12k_hw_group;
+ struct ath12k_pdev_map;
+-#ifdef __FreeBSD__
+-struct ath12k_link_vif;
+-void ath12k_mac_m4_cancel(struct ath12k_link_vif *arvif, const char *reason);
+-#endif
+ 
+ struct ath12k_generic_iter {
+ 	struct ath12k *ar;
+diff --git a/sys/contrib/dev/athk/ath12k/wifi7/hw.c b/sys/contrib/dev/athk/ath12k/wifi7/hw.c
+index de1996a6..49b0b93f 100644
+--- a/sys/contrib/dev/athk/ath12k/wifi7/hw.c
++++ b/sys/contrib/dev/athk/ath12k/wifi7/hw.c
+@@ -758,102 +758,6 @@ static const struct ath12k_hw_params ath12k_wifi7_hw_params[] = {
+ 	},
+ };
+ 
+-#ifdef __FreeBSD__
+-static bool ath12k_wifi7_m4_stage(struct ieee80211_hw *hw,
+-				struct ath12k_link_vif *arvif,
+-				struct sk_buff *skb)
+-{
+-	struct ath12k_skb_cb *cb = ATH12K_SKB_CB(skb);
+-	struct ieee80211_hdr *hdr = (struct ieee80211_hdr *)skb->data;
+-	struct sk_buff *old;
+-
+-	lockdep_assert_wiphy(hw->wiphy);
+-	if (!arvif->native_m4_initial)
+-		return false;
+-	if (!READ_ONCE(ath12k_m4_after_keys)) {
+-		ath12k_mac_m4_cancel(arvif, "disabled");
+-		arvif->native_m4_initial = false;
+-		return false;
+-	}
+-	if (skb->len < sizeof(*hdr) ||
+-	    cb->flags & (ATH12K_SKB_CIPHER_SET | ATH12K_SKB_HW_80211_ENCAP) ||
+-	    !ieee80211_is_data(hdr->frame_control) ||
+-	    ieee80211_has_protected(hdr->frame_control) ||
+-	    !linuxkpi_ieee80211_sta_m4_current(hw, skb, NULL))
+-		return false;
+-
+-	old = arvif->native_m4_skb;
+-	arvif->native_m4_skb = skb;
+-	if (old) {
+-		ath12k_warn(arvif->ar->ab, "experimental staged M4 replaced\n");
+-		ieee80211_free_txskb(hw, old);
+-	} else {
+-		arvif->native_m4_deadline = jiffies + msecs_to_jiffies(1000);
+-		wiphy_delayed_work_queue(hw->wiphy, &arvif->native_m4_work,
+-					msecs_to_jiffies(10));
+-	}
+-	return true;
+-}
+-
+-void ath12k_wifi7_m4_work(struct wiphy *wiphy, struct wiphy_work *work)
+-{
+-	struct ath12k_link_vif *arvif =
+-	    container_of(work, struct ath12k_link_vif, native_m4_work.work);
+-	struct ieee80211_hw *hw = arvif->ahvif->ah->hw;
+-	struct ath12k *ar = arvif->ar;
+-	struct ath12k_pdev_dp *dp_pdev;
+-	struct ath12k_dp *dp;
+-	struct sk_buff *skb = arvif->native_m4_skb;
+-	bool keys_ready;
+-	int ret;
+-
+-	lockdep_assert_wiphy(wiphy);
+-	if (!skb)
+-		return;
+-	if (!READ_ONCE(ath12k_m4_after_keys) || !arvif->native_m4_initial ||
+-	    !ar || !arvif->is_created || !arvif->is_started || !arvif->is_up ||
+-	    time_after_eq(jiffies, arvif->native_m4_deadline)) {
+-		ath12k_mac_m4_cancel(arvif, "disabled, disconnected or timed out");
+-		arvif->native_m4_initial = false;
+-		return;
+-	}
+-	dp = ath12k_ab_to_dp(ar->ab);
+-	if (!dp || READ_ONCE(dp->native_stopping) ||
+-	    READ_ONCE(dp->native_quarantined) ||
+-	    !linuxkpi_ieee80211_sta_m4_current(hw, skb, &keys_ready)) {
+-		ath12k_mac_m4_cancel(arvif, "stale handshake or TX unavailable");
+-		arvif->native_m4_initial = false;
+-		return;
+-	}
+-	if (!keys_ready || !arvif->native_m4_ready ||
+-	    READ_ONCE(dp->native_tx_paused)) {
+-		wiphy_delayed_work_queue(wiphy, &arvif->native_m4_work,
+-					msecs_to_jiffies(10));
+-		return;
+-	}
+-	dp_pdev = ath12k_dp_to_pdev_dp(dp, ar->pdev_idx);
+-	if (!dp_pdev) {
+-		ath12k_mac_m4_cancel(arvif, "missing TX pdev");
+-		arvif->native_m4_initial = false;
+-		return;
+-	}
+-
+-	arvif->native_m4_skb = NULL;
+-	arvif->native_m4_deadline = 0;
+-	arvif->native_m4_initial = false;
+-	arvif->native_m4_ready = false;
+-	/* The driver CB is already initialized; never re-enter mac_op_tx. */
+-	rcu_read_lock();
+-	ret = ath12k_wifi7_dp_tx(dp_pdev, arvif, skb, false, 0, false);
+-	rcu_read_unlock();
+-	if (ret) {
+-		ath12k_warn(ar->ab, "experimental staged M4 transmit failed: %d\n",
+-			    ret);
+-		ieee80211_free_txskb(hw, skb);
+-	}
+-}
+-#endif
+-
+ /* Note: called under rcu_read_lock() */
+ static void ath12k_wifi7_mac_op_tx(struct ieee80211_hw *hw,
+ 				   struct ieee80211_tx_control *control,
+@@ -958,10 +862,6 @@ static void ath12k_wifi7_mac_op_tx(struct ieee80211_hw *hw,
+ 		ieee80211_free_txskb(hw, skb);
+ 		return;
+ 	}
+-#ifdef __FreeBSD__
+-	if (ath12k_wifi7_m4_stage(hw, arvif, skb))
+-		return;
+-#endif
+ 
+ 	/* Checking if it is a DVLAN frame */
+ 	if (!test_bit(ATH12K_FLAG_HW_CRYPTO_DISABLED, &ar->ab->dev_flags) &&
+diff --git a/sys/contrib/dev/athk/ath12k/wifi7/hw.h b/sys/contrib/dev/athk/ath12k/wifi7/hw.h
+index 8a3a0323..643b6fdf 100644
+--- a/sys/contrib/dev/athk/ath12k/wifi7/hw.h
++++ b/sys/contrib/dev/athk/ath12k/wifi7/hw.h
+@@ -9,10 +9,5 @@
+ 
+ struct ath12k_base;
+ int ath12k_wifi7_hw_init(struct ath12k_base *ab);
+-#ifdef __FreeBSD__
+-struct wiphy;
+-struct wiphy_work;
+-void ath12k_wifi7_m4_work(struct wiphy *wiphy, struct wiphy_work *work);
+-#endif
+ 
+ #endif /* ATH12K_WIFI7_HW_H */
+diff --git a/sys/tests/linuxkpi_wlan/station_key_order_test.py b/sys/tests/linuxkpi_wlan/station_key_order_test.py
+index a07a3091..a7849491 100644
+--- a/sys/tests/linuxkpi_wlan/station_key_order_test.py
++++ b/sys/tests/linuxkpi_wlan/station_key_order_test.py
+@@ -1,5 +1,5 @@
+ #!/usr/bin/env python3
+-"""Exercise the gated production first-PTK ordering and plaintext TX guards."""
++"""Exercise production key-update draining and failure paths under sanitizers."""
+ 
+ import pathlib
+ import subprocess
+@@ -13,374 +13,84 @@
+ 
+ PRELUDE = r"""
+ #include <assert.h>
+-#include <errno.h>
+ #include <stdbool.h>
+-#include <stdint.h>
+-#include <stddef.h>
+ #include <stdio.h>
+ #include <string.h>
+-typedef uint8_t u8;
+ #ifndef __FreeBSD__
+ #define __FreeBSD__ 1
+ #endif
+-#define BIT(n) (1U << (n))
+-#define ARRAY_SIZE(a) ((int)(sizeof(a) / sizeof((a)[0])))
+-#define READ_ONCE(x) (x)
+-#define atomic_read(x) (*(x))
+-#define M_EAPOL BIT(0)
+-#define IEEE80211_TX_CTL_HW_80211_ENCAP BIT(1)
+-#define ATH12K_SKB_CIPHER_SET BIT(2)
+-#define ATH12K_SKB_HW_80211_ENCAP BIT(3)
+-#define IEEE80211_KEY_FLAG_PAIRWISE BIT(4)
+-#define WMI_VDEV_TYPE_STA 1
+ #define LKPI_STA_WPA2 1
+-#define WLAN_CIPHER_SUITE_CCMP 0x000fac04
+-#define WMI_PEER_AUTHORIZE 3
+ enum set_key_cmd { SET_KEY, DISABLE_KEY };
+-struct wiphy { bool locked; };
+-struct wiphy_work { bool queued; };
+-struct wiphy_delayed_work { struct wiphy_work work; unsigned long delay; };
+-struct ieee80211_hw { bool gated; struct wiphy *wiphy; };
+-struct ieee80211_hdr { uint16_t frame_control; uint8_t rest[22]; };
+-struct ieee80211_tx_info { unsigned flags; };
+-struct ath12k_skb_cb { unsigned flags; };
+-struct mbuf { unsigned m_flags; };
+-struct sk_buff {
+-    unsigned len;
+-    void *data;
+-    struct mbuf *m;
+-    struct ieee80211_tx_info info;
+-    struct ath12k_skb_cb driver;
+-    bool freed, sent, current, keys_ready;
+-};
+-#define IEEE80211_SKB_CB(s) (&(s)->info)
+-#define ATH12K_SKB_CB(s) (&(s)->driver)
+-#define ieee80211_has_protected(fc) (((fc) & 0x4000) != 0)
+-struct ath12k_tx_desc_info { struct sk_buff *skb; struct ath12k_tx_desc_info *next; };
+-struct list_head { struct ath12k_tx_desc_info *first; };
+-#define list_for_each_entry(p,h,m) for ((p) = (h)->first; (p); (p) = (p)->next)
+-struct ath12k_dp {
+-    bool native_tx_paused, native_stopping, native_quarantined;
+-    int tx_desc_lock[2], dp_lock;
+-    struct list_head tx_desc_used_list[2];
+-};
+-struct ath12k_base { struct ath12k_dp *dp; };
+-struct ath12k_hw { struct ieee80211_hw *hw; };
+-struct ath12k_vif { int vdev_type; struct ath12k_hw *ah; };
+-struct ath12k_link_vif {
+-    struct ath12k_vif *ahvif;
+-    unsigned vdev_id;
+-    bool pairwise_key_done;
+-    bool is_up;
+-    uint8_t bssid[6];
+-    struct ath12k *ar;
+-    bool native_m4_initial, native_m4_ready, is_created, is_started;
+-    struct sk_buff *native_m4_skb;
+-    struct wiphy_delayed_work native_m4_work;
+-    unsigned long native_m4_deadline;
+-};
+-struct ath12k_link_sta { uint8_t addr[6]; };
+-struct ieee80211_key_conf { unsigned flags, cipher; uint8_t keylen, keyidx; };
+-struct ath12k_dp_peer { struct ieee80211_key_conf *keys[4]; };
+-struct ath12k_dp_link_peer { struct ath12k_dp_peer *dp_peer; bool is_authorized; };
+-struct ath12k {
+-    struct ath12k_base *ab;
+-    struct ieee80211_hw *hw;
+-    int num_pending_mgmt_tx, pdev_idx;
+-};
+-#define ath12k_ab_to_dp(a) ((a)->dp)
++struct ieee80211_hw { bool gated; };
++struct ath12k_base { bool paused; };
++struct ath12k { struct ath12k_base *ab; struct ieee80211_hw *hw; };
++struct ath12k_link_vif { int unused; };
++struct ath12k_link_sta { int unused; };
++struct ieee80211_key_conf { int unused; };
+ #define ath12k_ar_to_hw(a) ((a)->hw)
+ #define ieee80211_hw_check(h,f) ((void)(f), (h)->gated)
+-static void spin_lock_bh(int *lock) { assert(*lock == 0); *lock = 1; }
+-static void spin_unlock_bh(int *lock) { assert(*lock == 1); *lock = 0; }
+-static bool ath12k_first_key_early;
+-static bool ath12k_qwz_bootstrap;
+-static bool ath12k_tx_de_stats;
+-static bool ath12k_m4_after_keys;
+-static unsigned queued, cancelled, freed;
+-#define lockdep_assert_wiphy(w) ((void)(w))
+-static void wiphy_delayed_work_queue(struct wiphy *w,
+-    struct wiphy_delayed_work *work, unsigned long delay)
+-{ (void)w; queued++; work->work.queued = true; work->delay = delay; }
+-static void wiphy_delayed_work_cancel(struct wiphy *w,
+-    struct wiphy_delayed_work *work)
+-{ (void)w; cancelled++; work->work.queued = false; }
+-static void ieee80211_free_txskb(struct ieee80211_hw *hw, struct sk_buff *skb)
+-{ (void)hw; assert(!skb->freed && !skb->sent); skb->freed = true; freed++; }
+-static unsigned stats_requests;
+-static void ath12k_dp_htt_native_tx_de_stats_request(struct ath12k *ar)
+-{ assert(!ar->ab->dp->native_tx_paused); stats_requests++; }
+-static struct ath12k_dp_link_peer *current_peer;
+-static struct ath12k_dp_link_peer *
+-ath12k_dp_link_peer_find_by_vdev_and_addr(struct ath12k_dp *dp,
+-    unsigned vdev, const uint8_t *addr)
+-{ (void)dp; (void)vdev; (void)addr; return current_peer; }
+-static char calls[16];
++static char calls[8];
+ static unsigned ncalls;
+ static int pause_error, wait_error, key_error;
+-static bool model_keys;
+-static int authorize_error, warnings;
+-static void ath12k_warn(void *ab, const char *format, ...)
+-{ (void)ab; (void)format; warnings++; }
+-static void record(char c) { assert(ncalls + 1 < sizeof(calls)); calls[ncalls++] = c; }
++static void record(char c)
++{ assert(ncalls + 1 < sizeof(calls)); calls[ncalls++] = c; }
+ static int ath12k_dp_tx_pause(struct ath12k_base *ab)
+-{ record('P'); ab->dp->native_tx_paused = pause_error == 0; return pause_error; }
++{
++    assert(!ab->paused); record('P');
++    ab->paused = pause_error == 0;
++    return pause_error;
++}
+ static void ath12k_dp_tx_resume(struct ath12k_base *ab)
+-{ record('R'); ab->dp->native_tx_paused = false; }
++{ assert(ab->paused); record('R'); ab->paused = false; }
+ static int ath12k_mac_wait_tx_complete(struct ath12k *ar)
+-{ (void)ar; record('W'); return wait_error; }
++{ assert(ar->ab->paused); record('W'); return wait_error; }
+ static int ath12k_mac_set_key_locked(struct ath12k *ar, enum set_key_cmd cmd,
+     struct ath12k_link_vif *vif, struct ath12k_link_sta *sta,
+     struct ieee80211_key_conf *key)
+ {
+-    (void)ar; (void)sta; record('K');
+-    if (model_keys && !key_error && current_peer && current_peer->dp_peer &&
+-        key->keyidx < 4) {
+-        current_peer->dp_peer->keys[key->keyidx] = cmd == SET_KEY ? key : NULL;
+-        if (key->flags & IEEE80211_KEY_FLAG_PAIRWISE)
+-            vif->pairwise_key_done = cmd == SET_KEY;
+-    }
+-    return key_error;
+-}
+-static int ath12k_wmi_set_peer_param(struct ath12k *ar, const uint8_t *addr,
+-    unsigned vdev, unsigned param, unsigned value)
+-{
+-    (void)addr; (void)vdev;
+-    assert(ar->ab->dp->native_tx_paused && ar->ab->dp->dp_lock == 0);
+-    assert(param == WMI_PEER_AUTHORIZE && value == 1);
+-    record('A'); return authorize_error;
++    (void)cmd; (void)vif; (void)sta; (void)key;
++    assert(!ar->hw->gated || ar->ab->paused);
++    record('K'); return key_error;
+ }
+ """
+ 
+ TEST = r"""
+ int main(void)
+ {
+-    struct ath12k_dp dp = {};
+-    struct ath12k_base ab = { .dp = &dp };
+-    struct wiphy wiphy = {};
+-    struct ieee80211_hw hw = { .gated = true, .wiphy = &wiphy };
+-    struct ath12k_hw ah = { .hw = &hw };
++    struct ath12k_base ab = {};
++    struct ieee80211_hw hw = { .gated = true };
+     struct ath12k ar = { .ab = &ab, .hw = &hw };
+-    struct ath12k_vif ahvif = { .vdev_type = WMI_VDEV_TYPE_STA, .ah = &ah };
+-    struct ath12k_link_vif vif = { .ahvif = &ahvif, .ar = &ar };
++    struct ath12k_link_vif vif = {};
+     struct ath12k_link_sta sta = {};
+-    struct ieee80211_key_conf key = { .flags = IEEE80211_KEY_FLAG_PAIRWISE };
+-    struct ath12k_dp_peer peer = {};
+-    struct ath12k_dp_link_peer link = { .dp_peer = &peer };
+-    struct ieee80211_hdr hdr = {};
+-    struct mbuf m = { .m_flags = M_EAPOL };
+-    struct sk_buff skb = { .len = sizeof(hdr), .data = &hdr, .m = &m };
+-    struct ath12k_tx_desc_info desc = { .skb = &skb };
+-    current_peer = &link;
+-    dp.tx_desc_used_list[0].first = &desc;
+-
+-    /* Disabled defaults, rekeys, non-EAPOL, and any crypto retain the drain. */
+-    for (int scenario = 0; scenario < 16; scenario++) {
+-        enum set_key_cmd cmd = SET_KEY;
+-        struct ath12k_link_sta *selected_sta = &sta;
+-        ath12k_first_key_early = true;
+-        vif.pairwise_key_done = false;
+-        ahvif.vdev_type = WMI_VDEV_TYPE_STA;
+-        key.flags = IEEE80211_KEY_FLAG_PAIRWISE;
+-        peer.keys[0] = NULL;
+-        ar.num_pending_mgmt_tx = 0;
+-        current_peer = &link;
+-        link.dp_peer = &peer;
+-        dp.tx_desc_used_list[0].first = &desc;
+-        skb.len = sizeof(hdr);
+-        skb.m = &m;
+-        skb.info.flags = skb.driver.flags = 0;
+-        hdr.frame_control = 0;
+-        m.m_flags = M_EAPOL;
+-        pause_error = wait_error = key_error = 0;
+-        if (scenario == 1) ath12k_first_key_early = false;
+-        if (scenario == 2) vif.pairwise_key_done = true;
+-        if (scenario == 3) peer.keys[0] = &key;
+-        if (scenario == 4) key.flags = 0;
+-        if (scenario == 5) cmd = DISABLE_KEY;
+-        if (scenario == 6) selected_sta = NULL;
+-        if (scenario == 7) ar.num_pending_mgmt_tx = 1;
+-        if (scenario == 8) m.m_flags = 0;
+-        if (scenario == 9) hdr.frame_control = 0x4000;
+-        if (scenario == 10) skb.driver.flags = ATH12K_SKB_CIPHER_SET;
+-        if (scenario == 11) skb.info.flags = IEEE80211_TX_CTL_HW_80211_ENCAP;
+-        if (scenario == 12) skb.m = NULL;
+-        if (scenario == 13) dp.tx_desc_used_list[0].first = NULL;
+-        if (scenario == 14) skb.len = 1;
+-        if (scenario == 15) current_peer = NULL;
+-        memset(calls, 0, sizeof(calls)); ncalls = 0;
+-        assert(ath12k_mac_set_key(&ar, cmd, &vif, selected_sta, &key) == 0);
+-        assert(strcmp(calls, scenario == 0 ? "PKR" : "PWKR") == 0);
+-        assert(dp.tx_desc_lock[0] == 0 && dp.tx_desc_lock[1] == 0 && dp.dp_lock == 0);
+-        assert(desc.skb == &skb && !dp.native_tx_paused);
+-    }
+-
+-    /* A protected frame in another pool disqualifies the entire snapshot. */
+-    struct ieee80211_hdr protected_hdr = { .frame_control = 0x4000 };
+-    struct sk_buff protected_skb = { .len = sizeof(hdr), .data = &protected_hdr, .m = &m };
+-    struct ath12k_tx_desc_info protected_desc = { .skb = &protected_skb };
+-    current_peer = &link; dp.native_tx_paused = true;
+-    dp.tx_desc_used_list[1].first = &protected_desc;
+-    assert(!ath12k_dp_tx_only_plain_eapol(&ab));
+-    assert(dp.tx_desc_lock[0] == 0 && dp.tx_desc_lock[1] == 0);
+-    dp.tx_desc_used_list[1].first = NULL;
+-    dp.native_tx_paused = false;
+-    assert(!ath12k_dp_tx_only_plain_eapol(&ab));
+-
+-    /* Existing failure paths must not install a key or lose the TX fence. */
+-    pause_error = -1; memset(calls, 0, sizeof(calls)); ncalls = 0;
+-    assert(ath12k_mac_set_key(&ar, SET_KEY, &vif, &sta, &key) == -1);
+-    assert(strcmp(calls, "P") == 0);
+-    pause_error = 0; ath12k_first_key_early = false; wait_error = -2;
+-    memset(calls, 0, sizeof(calls)); ncalls = 0;
+-    assert(ath12k_mac_set_key(&ar, SET_KEY, &vif, &sta, &key) == -2);
+-    assert(strcmp(calls, "PWR") == 0);
+-    wait_error = 0; key_error = -3;
+-    memset(calls, 0, sizeof(calls)); ncalls = 0;
+-    assert(ath12k_mac_set_key(&ar, SET_KEY, &vif, &sta, &key) == -3);
+-    assert(strcmp(calls, "PWKR") == 0);
+-    ath12k_first_key_early = true;
+-    memset(calls, 0, sizeof(calls)); ncalls = 0;
+-    assert(ath12k_mac_set_key(&ar, SET_KEY, &vif, &sta, &key) == -3);
+-    assert(strcmp(calls, "PKR") == 0 && desc.skb == &skb);
+-
+-    /* qwz bootstrap installs BOTH initial key classes before firmware readiness. */
+-    key_error = 0; ath12k_first_key_early = false; ath12k_qwz_bootstrap = true;
+-    model_keys = true; vif.is_up = true; vif.pairwise_key_done = false;
+-    current_peer = &link; link.dp_peer = &peer; link.is_authorized = false;
+-    memset(peer.keys, 0, sizeof(peer.keys));
+-    skb.len = sizeof(hdr); skb.m = &m; m.m_flags = M_EAPOL;
+-    skb.info.flags = skb.driver.flags = hdr.frame_control = 0;
+-    dp.tx_desc_used_list[0].first = &desc;
+-    struct ieee80211_key_conf ptk = {
+-        .flags = IEEE80211_KEY_FLAG_PAIRWISE, .cipher = WLAN_CIPHER_SUITE_CCMP,
+-        .keylen = 16, .keyidx = 0
+-    };
+-    struct ieee80211_key_conf gtk = {
+-        .cipher = WLAN_CIPHER_SUITE_CCMP, .keylen = 16, .keyidx = 1
+-    };
+-    memset(calls, 0, sizeof(calls)); ncalls = 0;
+-    assert(ath12k_mac_set_key(&ar, SET_KEY, &vif, &sta, &ptk) == 0);
+-    assert(strcmp(calls, "PKR") == 0 && !link.is_authorized);
+-    memset(calls, 0, sizeof(calls)); ncalls = 0;
+-    assert(ath12k_mac_set_key(&ar, SET_KEY, &vif, NULL, &gtk) == 0);
+-    assert(strcmp(calls, "PKAR") == 0 && link.is_authorized);
+-    assert(peer.keys[0] == &ptk && peer.keys[1] == &gtk && desc.skb == &skb);
+-    memset(calls, 0, sizeof(calls)); ncalls = 0;
+-    assert(ath12k_mac_set_key(&ar, SET_KEY, &vif, NULL, &gtk) == 0);
+-    assert(strcmp(calls, "PWKR") == 0); /* Rekey never uses bootstrap. */
+-
+-    /* First GTK still drains protected TX, but readiness follows successful keys. */
+-    peer.keys[1] = NULL; link.is_authorized = false;
+-    hdr.frame_control = 0x4000;
+-    memset(calls, 0, sizeof(calls)); ncalls = 0;
+-    assert(ath12k_mac_set_key(&ar, SET_KEY, &vif, NULL, &gtk) == 0);
+-    assert(strcmp(calls, "PWKAR") == 0);
+-    hdr.frame_control = 0;
+-
+-    /* Authorization failure is logged without freeing an already installed key. */
+-    peer.keys[1] = NULL; link.is_authorized = false; authorize_error = -5;
+-    memset(calls, 0, sizeof(calls)); ncalls = 0;
+-    assert(ath12k_mac_set_key(&ar, SET_KEY, &vif, NULL, &gtk) == 0);
+-    assert(strcmp(calls, "PKAR") == 0 && warnings == 1);
+-    assert(!link.is_authorized && peer.keys[1] == &gtk);
+-    authorize_error = 0; peer.keys[1] = NULL;
+-
+-    /* Initial GTK requires a real PTK, a fresh slot, CCMP and a live STA peer. */
+-    for (int scenario = 0; scenario < 10; scenario++) {
+-        gtk.keyidx = 1; gtk.keylen = 16; gtk.cipher = WLAN_CIPHER_SUITE_CCMP;
+-        vif.is_up = true; ar.num_pending_mgmt_tx = 0; peer.keys[0] = &ptk;
+-        peer.keys[1] = NULL; link.is_authorized = false; current_peer = &link;
+-        vif.pairwise_key_done = true; ath12k_qwz_bootstrap = true;
+-        if (scenario == 0) peer.keys[0] = NULL;
+-        if (scenario == 1) gtk.keyidx = 0;
+-        if (scenario == 2) gtk.keylen = 32;
+-        if (scenario == 3) gtk.cipher = 0;
+-        if (scenario == 4) vif.is_up = false;
+-        if (scenario == 5) ar.num_pending_mgmt_tx = 1;
+-        if (scenario == 6) peer.keys[1] = &gtk;
+-        if (scenario == 7) link.is_authorized = true;
+-        if (scenario == 8) current_peer = NULL;
+-        if (scenario == 9) ath12k_qwz_bootstrap = false;
+-        assert(!ath12k_mac_qwz_initial_key(&ar, SET_KEY, &vif, &sta, &gtk));
+-    }
+-    /* Optional diagnostics run only after a successful CCMP group install. */
+-    for (int scenario = 0; scenario < 6; scenario++) {
+-        ath12k_qwz_bootstrap = ath12k_first_key_early = false;
+-        ath12k_tx_de_stats = scenario != 1;
+-        gtk.cipher = scenario == 2 ? 0 : WLAN_CIPHER_SUITE_CCMP;
+-        gtk.flags = scenario == 3 ? IEEE80211_KEY_FLAG_PAIRWISE : 0;
+-        gtk.keyidx = 1;
+-        key_error = scenario == 4 ? -5 : 0;
+-        enum set_key_cmd cmd = scenario == 5 ? DISABLE_KEY : SET_KEY;
+-        stats_requests = 0;
+-        memset(calls, 0, sizeof(calls)); ncalls = 0;
+-        assert(ath12k_mac_set_key(&ar, cmd, &vif, NULL, &gtk) == key_error);
+-        assert(stats_requests == (scenario == 0 ? 1U : 0U));
+-        assert(!dp.native_tx_paused);
+-    }
+-    puts("production first-PTK gate: plaintext-only ordering, rekey/crypto exclusion and failures passed");
+-    puts("qwz bootstrap: initial PTK/GTK, firmware readiness, rekey exclusion and key ownership passed");
+-    /* Staging never borrows either older experiment's completion bypass. */
+-    ath12k_tx_de_stats = false; gtk.flags = 0;
+-    gtk.cipher = WLAN_CIPHER_SUITE_CCMP; gtk.keyidx = 1; gtk.keylen = 16;
+-    for (int scenario = 0; scenario < 8; scenario++) {
+-        ath12k_m4_after_keys = true;
+-        ath12k_qwz_bootstrap = ath12k_first_key_early = true;
+-        vif.native_m4_initial = true; vif.native_m4_ready = false;
+-        vif.native_m4_skb = &skb; skb.freed = skb.sent = false;
+-        vif.pairwise_key_done = false; vif.is_up = true;
+-        current_peer = &link; link.dp_peer = &peer; link.is_authorized = false;
+-        memset(peer.keys, 0, sizeof(peer.keys));
+-        ar.num_pending_mgmt_tx = 0;
+-        pause_error = wait_error = key_error = authorize_error = 0;
+-        queued = freed = 0;
+-        if (scenario == 1) key_error = -2;
+-        if (scenario == 2) wait_error = -3;
+-        if (scenario == 3) authorize_error = -4;
+-        if (scenario == 4) {
+-            ath12k_m4_after_keys = false;
+-            ath12k_qwz_bootstrap = ath12k_first_key_early = false;
+-        }
+-        if (scenario == 5) {
+-            peer.keys[0] = &ptk;
+-            vif.pairwise_key_done = true;
+-        }
+-        if (scenario == 7) pause_error = -5;
+-        enum set_key_cmd cmd = scenario == 6 ? DISABLE_KEY : SET_KEY;
+-        memset(calls, 0, sizeof(calls)); ncalls = 0;
+-        assert(ath12k_mac_set_key(&ar, cmd, &vif, &sta, &ptk) ==
+-            (pause_error ? pause_error : wait_error ? wait_error : key_error));
+-        assert(!dp.native_tx_paused);
+-        if (scenario == 0 || scenario == 3) {
+-            assert(strcmp(calls, "PWKR") == 0 && !vif.native_m4_ready);
+-            memset(calls, 0, sizeof(calls)); ncalls = 0;
+-            assert(ath12k_mac_set_key(&ar, SET_KEY, &vif, NULL, &gtk) == 0);
+-            assert(strcmp(calls, "PWKAR") == 0);
+-            assert(peer.keys[1] == &gtk); /* Ownership survives WMI failure. */
+-            assert(vif.native_m4_ready == (scenario == 0));
+-            assert(queued == (scenario == 0 ? 1U : 0U));
++    struct ieee80211_key_conf key = {};
++    for (int command = SET_KEY; command <= DISABLE_KEY; command++) {
++        for (int group = 0; group < 2; group++) {
++            for (int scenario = 0; scenario < 5; scenario++) {
++                hw.gated = scenario != 4;
++                pause_error = scenario == 1 ? -1 : 0;
++                wait_error = scenario == 2 ? -2 : 0;
++                key_error = scenario == 3 ? -3 : 0;
++                memset(calls, 0, sizeof(calls)); ncalls = 0;
++                int ret = ath12k_mac_set_key(&ar, command, &vif,
++                    group ? NULL : &sta, &key);
++                assert(ret == (pause_error ? pause_error :
++                    wait_error ? wait_error : key_error));
++                assert(strcmp(calls, scenario == 1 ? "P" :
++                    scenario == 2 ? "PWR" :
++                    scenario == 4 ? "K" : "PWKR") == 0);
++                assert(!ab.paused);
++            }
+         }
+-        assert(freed == (scenario == 0 ? 0U : 1U));
+-        assert(vif.native_m4_initial == (scenario == 0));
+-        vif.native_m4_skb = NULL;
+     }
+-    puts("M4 staging: normal drains, key/replay/WMI failures, disable and rekey cancellation passed");
++    puts("production key ordering: mandatory drain, PTK/GTK install/removal and failures passed");
+     return 0;
+ }
+ """
+ 
+ 
+ def main():
+-    code = PRELUDE
+-    code += function((ATH12K / "dp.c").read_text(), "ath12k_dp_tx_only_plain_eapol")
+-    mac = (ATH12K / "mac.c").read_text()
+-    code += function(mac, "ath12k_mac_m4_cancel")
+-    code += function(mac, "ath12k_mac_qwz_initial_key")
+-    code += function(mac, "ath12k_mac_qwz_peer_ready")
+-    code += function(mac, "ath12k_mac_first_key_early")
+-    code += function(mac, "ath12k_mac_set_key")
+-    code += TEST
++    code = PRELUDE + function((ATH12K / "mac.c").read_text(),
++                              "ath12k_mac_set_key") + TEST
+     with tempfile.TemporaryDirectory(prefix="station-key-order-") as temp:
+         source = pathlib.Path(temp) / "test.c"
+         binary = pathlib.Path(temp) / "test"
+diff --git a/sys/tests/linuxkpi_wlan/station_m4_stage_test.py b/sys/tests/linuxkpi_wlan/station_m4_stage_test.py
+deleted file mode 100644
+index 11f75cd2..00000000
+--- a/sys/tests/linuxkpi_wlan/station_m4_stage_test.py
++++ /dev/null
+@@ -1,380 +0,0 @@
+-#!/usr/bin/env python3
+-"""Exercise production M4 staging and kernel token validation under sanitizers."""
+-
+-import pathlib
+-import subprocess
+-import tempfile
+-
+-from regulatory_production_test import function
+-from station_key_order_test import ATH12K, PRELUDE, ROOT
+-
+-
+-DRIVER_PRELUDE = r"""
+-#undef lockdep_assert_wiphy
+-#define lockdep_assert_wiphy(w) assert((w) && (w)->locked)
+-#define container_of(p,t,m) ((t *)((char *)(p) - offsetof(t,m)))
+-#define msecs_to_jiffies(n) (n)
+-#define time_after_eq(a,b) ((long)((a) - (b)) >= 0)
+-#define ieee80211_is_data(fc) (((fc) & 0x000c) == 0x0008)
+-static unsigned long jiffies;
+-struct ath12k_pdev_dp { int unused; };
+-static struct ath12k_pdev_dp pdev;
+-static bool pdev_missing;
+-static int tx_error;
+-static unsigned submitted, rcu_depth;
+-static void rcu_read_lock(void) { rcu_depth++; }
+-static void rcu_read_unlock(void) { assert(rcu_depth == 1); rcu_depth--; }
+-static bool linuxkpi_ieee80211_sta_m4_current(struct ieee80211_hw *hw,
+-    struct sk_buff *skb, bool *keys_ready)
+-{
+-    lockdep_assert_wiphy(hw->wiphy);
+-    if (keys_ready) *keys_ready = skb->current && skb->keys_ready;
+-    return skb->current;
+-}
+-static struct ath12k_pdev_dp *ath12k_dp_to_pdev_dp(struct ath12k_dp *dp, int idx)
+-{ (void)dp; (void)idx; return pdev_missing ? NULL : &pdev; }
+-static int ath12k_wifi7_dp_tx(struct ath12k_pdev_dp *dp,
+-    struct ath12k_link_vif *vif, struct sk_buff *skb, bool gsn_valid,
+-    unsigned gsn, bool multicast)
+-{
+-    (void)dp;
+-    assert(rcu_depth == 1 && !gsn_valid && !gsn && !multicast);
+-    assert(!vif->ar->ab->dp->native_tx_paused);
+-    assert(!skb->freed && !skb->sent && skb->current && skb->keys_ready);
+-    assert(!vif->native_m4_skb && !vif->native_m4_initial);
+-    submitted++;
+-    if (!tx_error) skb->sent = true;
+-    return tx_error;
+-}
+-"""
+-
+-DRIVER_TEST = r"""
+-int main(void)
+-{
+-    struct wiphy w = { .locked = true };
+-    struct ieee80211_hw hw = { .gated = true, .wiphy = &w };
+-    struct ath12k_hw ah = { .hw = &hw };
+-    struct ath12k_dp dp = {};
+-    struct ath12k_base ab = { .dp = &dp };
+-    struct ath12k ar = { .ab = &ab, .hw = &hw };
+-    struct ath12k_vif ahvif = { .vdev_type = WMI_VDEV_TYPE_STA, .ah = &ah };
+-    struct ath12k_link_vif vif = { .ahvif = &ahvif, .ar = &ar };
+-    struct ieee80211_hdr hdr = { .frame_control = 8 };
+-    struct mbuf m = { .m_flags = M_EAPOL };
+-    struct sk_buff skb = { .len = sizeof(hdr), .data = &hdr, .m = &m,
+-        .current = true };
+-
+-    /* Default-off, encrypted, encapsulated, non-data and stale frames bypass staging. */
+-    for (int scenario = 0; scenario < 8; scenario++) {
+-        ath12k_m4_after_keys = true; vif.native_m4_initial = true;
+-        hdr.frame_control = 8; skb.len = sizeof(hdr);
+-        skb.driver.flags = 0; skb.current = true; queued = 0;
+-        if (scenario == 0) vif.native_m4_initial = false;
+-        if (scenario == 1) ath12k_m4_after_keys = false;
+-        if (scenario == 2) skb.driver.flags = ATH12K_SKB_CIPHER_SET;
+-        if (scenario == 3) skb.driver.flags = ATH12K_SKB_HW_80211_ENCAP;
+-        if (scenario == 4) hdr.frame_control |= 0x4000;
+-        if (scenario == 5) hdr.frame_control = 0;
+-        if (scenario == 6) skb.current = false;
+-        if (scenario == 7) skb.len = 1;
+-        assert(!ath12k_wifi7_m4_stage(&hw, &vif, &skb));
+-        assert(!vif.native_m4_skb && !queued && !skb.freed && !skb.sent);
+-    }
+-    hdr.frame_control = 8; skb.len = sizeof(hdr);
+-    skb.driver.flags = 0; skb.current = true;
+-
+-    /* One owned skb, no DMA, and replacements cannot postpone the deadline/timer. */
+-    ath12k_m4_after_keys = vif.native_m4_initial = true;
+-    jiffies = 20; queued = freed = submitted = 0;
+-    assert(ath12k_wifi7_m4_stage(&hw, &vif, &skb));
+-    unsigned long deadline = vif.native_m4_deadline;
+-    struct sk_buff replacement = skb;
+-    jiffies = deadline - 1;
+-    assert(ath12k_wifi7_m4_stage(&hw, &vif, &replacement));
+-    assert(skb.freed && freed == 1 && queued == 1 && !submitted);
+-    assert(vif.native_m4_deadline == deadline && vif.native_m4_skb == &replacement);
+-    assert(replacement.m == &m && replacement.data == &hdr);
+-    jiffies = deadline;
+-    vif.native_m4_ready = replacement.keys_ready = true;
+-    vif.is_created = vif.is_started = vif.is_up = true;
+-    ath12k_wifi7_m4_work(&w, &vif.native_m4_work.work);
+-    assert(replacement.freed && freed == 2 && !submitted);
+-    ath12k_mac_m4_cancel(&vif, "second cancellation");
+-    assert(freed == 2);
+-
+-    /* Teardown, stale tokens, disable and every release failure free exactly once. */
+-    for (int scenario = 0; scenario < 16; scenario++) {
+-        ath12k_m4_after_keys = vif.native_m4_initial = true;
+-        vif.ar = &ar; vif.is_created = vif.is_started = vif.is_up = true;
+-        vif.native_m4_ready = true;
+-        dp.native_stopping = dp.native_quarantined = dp.native_tx_paused = false;
+-        skb.freed = skb.sent = false; skb.current = skb.keys_ready = true;
+-        pdev_missing = false; tx_error = 0; jiffies = 100;
+-        queued = freed = submitted = 0;
+-        assert(ath12k_wifi7_m4_stage(&hw, &vif, &skb));
+-        if (scenario == 0) jiffies = vif.native_m4_deadline;
+-        if (scenario == 1) ath12k_m4_after_keys = false;
+-        if (scenario == 2) vif.native_m4_initial = false;
+-        if (scenario == 3) vif.is_up = false;
+-        if (scenario == 4) vif.is_started = false;
+-        if (scenario == 5) vif.is_created = false;
+-        if (scenario == 6) vif.ar = NULL;
+-        if (scenario == 7) dp.native_stopping = true;
+-        if (scenario == 8) dp.native_quarantined = true;
+-        if (scenario == 9) skb.current = false;
+-        if (scenario == 10) skb.keys_ready = false;
+-        if (scenario == 11) vif.native_m4_ready = false;
+-        if (scenario == 12) dp.native_tx_paused = true;
+-        if (scenario == 13) pdev_missing = true;
+-        if (scenario == 14) tx_error = -EIO;
+-        ath12k_wifi7_m4_work(&w, &vif.native_m4_work.work);
+-        if (scenario >= 10 && scenario <= 12) {
+-            assert(vif.native_m4_skb == &skb && !freed && !submitted);
+-            assert(queued == 2 && vif.native_m4_deadline == 1100);
+-            ath12k_mac_m4_cancel(&vif, "test cleanup");
+-        }
+-        assert(submitted == (scenario >= 14 ? 1U : 0U));
+-        assert(freed == (scenario == 15 ? 0U : 1U));
+-        assert(!vif.native_m4_skb && !vif.native_m4_deadline);
+-        ath12k_mac_m4_cancel(&vif, "idempotent cleanup");
+-        assert(freed == (scenario == 15 ? 0U : 1U));
+-    }
+-
+-    /* Real staging + key wrapper: no release before LKPI records both keys. */
+-    dp.native_stopping = dp.native_quarantined = dp.native_tx_paused = false;
+-    pdev_missing = false; tx_error = 0;
+-    vif.ar = &ar; vif.native_m4_initial = true; vif.native_m4_ready = false;
+-    vif.is_created = vif.is_started = vif.is_up = true;
+-    vif.pairwise_key_done = false;
+-    skb.freed = skb.sent = skb.keys_ready = false; skb.current = true;
+-    ath12k_m4_after_keys = model_keys = true;
+-    ath12k_first_key_early = ath12k_qwz_bootstrap = false;
+-    struct ath12k_dp_peer peer = {};
+-    struct ath12k_dp_link_peer link = { .dp_peer = &peer };
+-    struct ath12k_link_sta sta = {};
+-    struct ieee80211_key_conf ptk = { .cipher = WLAN_CIPHER_SUITE_CCMP,
+-        .flags = IEEE80211_KEY_FLAG_PAIRWISE, .keylen = 16 };
+-    struct ieee80211_key_conf gtk = { .cipher = WLAN_CIPHER_SUITE_CCMP,
+-        .keylen = 16, .keyidx = 1 };
+-    current_peer = &link; submitted = freed = 0; jiffies = 0;
+-    assert(ath12k_wifi7_m4_stage(&hw, &vif, &skb));
+-    memset(calls, 0, sizeof(calls)); ncalls = 0;
+-    assert(!ath12k_mac_set_key(&ar, SET_KEY, &vif, &sta, &ptk));
+-    assert(!vif.native_m4_ready && strcmp(calls, "PWKR") == 0);
+-    ath12k_wifi7_m4_work(&w, &vif.native_m4_work.work);
+-    assert(!submitted && vif.native_m4_skb == &skb);
+-    memset(calls, 0, sizeof(calls)); ncalls = 0;
+-    assert(!ath12k_mac_set_key(&ar, SET_KEY, &vif, NULL, &gtk));
+-    assert(vif.native_m4_ready && strcmp(calls, "PWKAR") == 0);
+-    ath12k_wifi7_m4_work(&w, &vif.native_m4_work.work);
+-    assert(!submitted); /* Driver command success is not yet LKPI key proof. */
+-    skb.keys_ready = true;
+-    ath12k_wifi7_m4_work(&w, &vif.native_m4_work.work);
+-    assert(submitted == 1 && skb.sent && !freed);
+-    puts("production M4 staging: ordering, timeout, replacement, cancellation and ownership passed");
+-    return 0;
+-}
+-"""
+-
+-KERNEL_PRELUDE = r"""
+-#include <assert.h>
+-#include <stdbool.h>
+-#include <stdint.h>
+-#include <stdio.h>
+-#include <string.h>
+-#include "linux_80211_sta.h"
+-#define min(a,b) ((a) < (b) ? (a) : (b))
+-#define IEEE80211_FC0_TYPE_MASK 0x0c
+-#define IEEE80211_FC0_TYPE_DATA 8
+-#define IEEE80211_FC1_DIR_MASK 3
+-#define IEEE80211_FC1_DIR_TODS 1
+-#define IEEE80211_FC1_DIR_FROMDS 2
+-#define IEEE80211_STA_ASSOC 2
+-#define IEEE80211_S_RUN 5
+-#define LKPI_STA_WPA2 1
+-#define LKPI80211_TAG_M4 1
+-#define MTAG_ABI_LKPI80211 1707696513
+-#define IEEE80211_ADDR_EQ(a,b) (memcmp(a,b,6) == 0)
+-#define atomic_load_acq_int(p) (*(p))
+-#define lockdep_assert_wiphy(w) assert((w)->locked)
+-#define LKPI_80211_LSTA_TXQ_LOCK(s) assert(!(s)->locked); (s)->locked = true
+-#define LKPI_80211_LSTA_TXQ_UNLOCK(s) assert((s)->locked); (s)->locked = false
+-struct wiphy { bool locked, reg_allowed; };
+-struct ieee80211_hw { struct wiphy *wiphy; bool gated; };
+-struct ieee80211_vif { struct { bool assoc; } cfg; };
+-struct ieee80211_sta { struct lkpi_sta *lsta; };
+-struct lkpi_vif {
+-    struct lkpi_sta *lvif_bss;
+-    bool lvif_bss_synched;
+-    struct ieee80211_vif vif;
+-};
+-struct vap { int iv_state; struct lkpi_vif *lvif; };
+-struct ieee80211_node {
+-    struct lkpi_sta *ni_drv_data;
+-    struct vap *ni_vap;
+-    uint8_t ni_bssid[6];
+-};
+-struct lkpi_sta {
+-    struct ieee80211_hw *hw;
+-    struct ieee80211_node *ni;
+-    struct lkpi_sta_port port;
+-    unsigned port_key_busy, port_open;
+-    bool added_to_drv, locked, guarded;
+-    int state;
+-};
+-struct lkpi_sta_m4 { uint64_t replay; uint32_t epoch; };
+-struct m_tag { size_t m_tag_len; };
+-struct mbuf {
+-    struct { unsigned len; struct { void *ptr; } PH_loc; } m_pkthdr;
+-    struct m_tag *tag;
+-    uint8_t data[256];
+-};
+-struct sk_buff { void *m; };
+-struct ieee80211_frame {
+-    uint8_t i_fc[2], duration[2], i_addr1[6], i_addr2[6], i_addr3[6], seq[2];
+-};
+-#define VAP_TO_LVIF(v) ((v)->lvif)
+-#define LVIF_TO_VIF(v) (&(v)->vif)
+-#define STA_TO_LSTA(s) ((s)->lsta)
+-#define ieee80211_hw_check(h,f) ((void)(f), (h)->gated)
+-static bool lkpi_sta_port_enabled(struct lkpi_sta *s) { return s->guarded; }
+-static bool lkpi_reg_tx_allowed(struct wiphy *w) { return w->reg_allowed; }
+-static unsigned ieee80211_anyhdrsize(struct ieee80211_frame *f)
+-{ (void)f; return sizeof(*f); }
+-static void m_copydata(struct mbuf *m, unsigned off, unsigned n, void *out)
+-{ assert(off + n <= m->m_pkthdr.len); memcpy(out, m->data + off, n); }
+-static struct m_tag *m_tag_locate(struct mbuf *m, unsigned cookie, int id, void *p)
+-{
+-    assert(cookie == MTAG_ABI_LKPI80211 && id == LKPI80211_TAG_M4 && !p);
+-    return m->tag;
+-}
+-"""
+-
+-KERNEL_TEST = r"""
+-int main(void)
+-{
+-    struct wiphy w = { .locked = true, .reg_allowed = true };
+-    struct ieee80211_hw hw = { .wiphy = &w, .gated = true };
+-    struct lkpi_vif vif = { .lvif_bss_synched = true, .vif.cfg.assoc = true };
+-    struct vap vap = { .iv_state = IEEE80211_S_RUN, .lvif = &vif };
+-    struct ieee80211_node ni = { .ni_vap = &vap };
+-    struct lkpi_sta sta = { .hw = &hw, .ni = &ni, .guarded = true,
+-        .added_to_drv = true, .state = IEEE80211_STA_ASSOC };
+-    struct { struct m_tag tag; struct lkpi_sta_m4 token; } tagged = {};
+-    struct mbuf m = { .m_pkthdr.len = sizeof(struct ieee80211_frame) + 8 + 99,
+-        .m_pkthdr.PH_loc.ptr = &ni, .tag = &tagged.tag };
+-    struct sk_buff skb = { .m = &m };
+-    ni.ni_drv_data = &sta; vif.lvif_bss = &sta;
+-    m.data[0] = 8; m.data[1] = 1;
+-    const uint8_t llc[] = { 0xaa, 0xaa, 3, 0, 0, 0, 0x88, 0x8e };
+-    memcpy(m.data + sizeof(struct ieee80211_frame), llc, sizeof(llc));
+-    uint8_t *e = m.data + sizeof(struct ieee80211_frame) + sizeof(llc);
+-    e[0] = 2; e[1] = 3; e[3] = 95; e[4] = 2; e[5] = 3; e[6] = 0x0a;
+-    e[16] = 42;
+-    uint8_t nonce[32] = { 1 };
+-    assert(lkpi_sta_port_m3(&sta.port, 42, nonce));
+-    tagged.tag.m_tag_len = sizeof(tagged.token);
+-    tagged.token.epoch = sta.port.epoch; tagged.token.replay = 42;
+-    bool ready = true;
+-    assert(linuxkpi_ieee80211_sta_m4_current(&hw, &skb, &ready) && !ready);
+-    lkpi_sta_port_key(&sta.port, 0, true, true, true);
+-    assert(linuxkpi_ieee80211_sta_m4_current(&hw, &skb, &ready) && !ready);
+-    lkpi_sta_port_key(&sta.port, 1, false, true, true);
+-    assert(linuxkpi_ieee80211_sta_m4_current(&hw, &skb, &ready) && ready);
+-    assert(!lkpi_sta_port_ready(&sta.port)); /* Never synthesize an ACK. */
+-
+-    for (int scenario = 0; scenario < 20; scenario++) {
+-        struct lkpi_sta saved = sta;
+-        struct mbuf saved_m = m;
+-        if (scenario == 0) tagged.token.epoch--;
+-        if (scenario == 1) tagged.token.replay--;
+-        if (scenario == 2) e[16]--;
+-        if (scenario == 3) sta.port.failed = true;
+-        if (scenario == 4) sta.port_key_busy = 1;
+-        if (scenario == 5) sta.added_to_drv = false;
+-        if (scenario == 6) sta.state++;
+-        if (scenario == 7) vif.lvif_bss = NULL;
+-        if (scenario == 8) vif.lvif_bss_synched = false;
+-        if (scenario == 9) vap.iv_state = 0;
+-        if (scenario == 10) vif.vif.cfg.assoc = false;
+-        if (scenario == 11) w.reg_allowed = false;
+-        if (scenario == 12) sta.hw = NULL;
+-        if (scenario == 13) ni.ni_drv_data = NULL;
+-        if (scenario == 14) m.tag = NULL;
+-        if (scenario == 15) tagged.tag.m_tag_len--;
+-        if (scenario == 16) m.data[1] = IEEE80211_FC1_DIR_FROMDS;
+-        if (scenario == 17) m.data[4] = 1;
+-        if (scenario == 18) m.m_pkthdr.len = sizeof(struct ieee80211_frame) + 8;
+-        if (scenario == 19) e[5] = 1; /* M2 is not M4. */
+-        ready = true;
+-        assert(!linuxkpi_ieee80211_sta_m4_current(&hw, &skb, &ready) && !ready);
+-        sta = saved; m = saved_m;
+-        tagged.token.epoch = sta.port.epoch; tagged.token.replay = 42;
+-        tagged.tag.m_tag_len = sizeof(tagged.token); e = m.data + 32;
+-        vif.lvif_bss = &sta; vif.lvif_bss_synched = vif.vif.cfg.assoc = true;
+-        vap.iv_state = IEEE80211_S_RUN; w.reg_allowed = true;
+-        ni.ni_drv_data = &sta;
+-    }
+-    /* Existing TX admission now rejects a deferred stale token as well. */
+-    assert(linuxkpi_ieee80211_sta_tx_permitted(&hw, NULL, &skb));
+-    assert(lkpi_sta_port_m3(&sta.port, 43, nonce));
+-    assert(!linuxkpi_ieee80211_sta_tx_permitted(&hw, NULL, &skb));
+-    assert(!linuxkpi_ieee80211_sta_m4_current(&hw, &skb, &ready));
+-    tagged.token.epoch = sta.port.epoch; tagged.token.replay = 43; e[16] = 43;
+-    assert(linuxkpi_ieee80211_sta_m4_current(&hw, &skb, &ready) && ready);
+-    assert(!lkpi_sta_port_ready(&sta.port));
+-    assert(!lkpi_sta_port_ack(&sta.port, sta.port.epoch - 1, 42));
+-    assert(lkpi_sta_port_ack(&sta.port, sta.port.epoch, 43));
+-    assert(lkpi_sta_port_ready(&sta.port));
+-    puts("production M4 validator: real parser/tags, current generation, key proof and strict ACK gate passed");
+-    return 0;
+-}
+-"""
+-
+-
+-def run_c(code, include):
+-    with tempfile.TemporaryDirectory(prefix="station-m4-stage-") as temp:
+-        source = pathlib.Path(temp) / "test.c"
+-        binary = pathlib.Path(temp) / "test"
+-        source.write_text(code)
+-        subprocess.run(
+-            ["/usr/bin/cc", "-Wall", "-Wextra", "-Werror",
+-             "-fsanitize=address,undefined", "-fno-sanitize-recover=all",
+-             "-I", str(include), str(source), "-o", str(binary)], check=True)
+-        subprocess.run([str(binary)], check=True, timeout=10)
+-
+-
+-def main():
+-    mac = (ATH12K / "mac.c").read_text()
+-    hw = (ATH12K / "wifi7/hw.c").read_text()
+-    code = PRELUDE + DRIVER_PRELUDE
+-    code += function((ATH12K / "dp.c").read_text(), "ath12k_dp_tx_only_plain_eapol")
+-    for name in ("ath12k_mac_m4_cancel", "ath12k_mac_qwz_initial_key",
+-                 "ath12k_mac_qwz_peer_ready", "ath12k_mac_first_key_early",
+-                 "ath12k_mac_set_key"):
+-        code += function(mac, name)
+-    code += function(hw, "ath12k_wifi7_m4_stage")
+-    code += function(hw, "ath12k_wifi7_m4_work")
+-    run_c(code + DRIVER_TEST, ATH12K)
+-
+-    # Lifecycle wiring uses the same cancellation routine exercised above.
+-    for name in ("ath12k_bss_disassoc", "ath12k_mac_station_disassoc",
+-                 "ath12k_mac_station_remove", "ath12k_mac_remove_link_interface",
+-                 "ath12k_mac_vdev_delete", "ath12k_mac_op_unassign_vif_chanctx"):
+-        body = function(mac, name)
+-        assert "ath12k_mac_m4_cancel(arvif," in body, name
+-        assert "native_m4_initial = false" in body, name
+-    assert "ath12k_wifi7_m4_stage(hw, arvif, skb)" in function(hw, "ath12k_wifi7_mac_op_tx")
+-
+-    kernel = ROOT / "sys/compat/linuxkpi/common/src"
+-    source = (kernel / "linux_80211.c").read_text()
+-    code = KERNEL_PRELUDE
+-    for name in ("lkpi_sta_eapol", "lkpi_sta_m4_check", "lkpi_sta_tx_allowed",
+-                 "linuxkpi_ieee80211_sta_tx_permitted",
+-                 "linuxkpi_ieee80211_sta_m4_current"):
+-        code += function(source, name)
+-    run_c(code + KERNEL_TEST, kernel)
+-
+-
+-if __name__ == "__main__":
+-    main()
+diff --git a/sys/tests/linuxkpi_wlan/station_m4_token_test.py b/sys/tests/linuxkpi_wlan/station_m4_token_test.py
+new file mode 100644
+index 00000000..decf8728
+--- /dev/null
++++ b/sys/tests/linuxkpi_wlan/station_m4_token_test.py
+@@ -0,0 +1,151 @@
++#!/usr/bin/env python3
++"""Exercise production M4 token validation and TX admission under sanitizers."""
++
++import pathlib
++import subprocess
++import tempfile
++
++from regulatory_production_test import function
++
++
++ROOT = pathlib.Path(__file__).resolve().parents[3]
++KERNEL = ROOT / "sys/compat/linuxkpi/common/src"
++
++PRELUDE = r"""
++#include <assert.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <string.h>
++#include "linux_80211_sta.h"
++#define min(a,b) ((a) < (b) ? (a) : (b))
++#define IEEE80211_FC0_TYPE_MASK 0x0c
++#define IEEE80211_FC0_TYPE_DATA 8
++#define IEEE80211_FC1_DIR_MASK 3
++#define IEEE80211_FC1_DIR_TODS 1
++#define IEEE80211_FC1_DIR_FROMDS 2
++#define LKPI_STA_WPA2 1
++#define LKPI80211_TAG_M4 1
++#define MTAG_ABI_LKPI80211 1707696513
++#define IEEE80211_ADDR_EQ(a,b) (memcmp(a,b,6) == 0)
++#define atomic_load_acq_int(p) (*(p))
++#define LKPI_80211_LSTA_TXQ_LOCK(s) assert(!(s)->locked); (s)->locked = true
++#define LKPI_80211_LSTA_TXQ_UNLOCK(s) assert((s)->locked); (s)->locked = false
++struct ieee80211_hw { bool gated; };
++struct ieee80211_sta { struct lkpi_sta *lsta; };
++struct ieee80211_node {
++    struct lkpi_sta *ni_drv_data;
++    uint8_t ni_bssid[6];
++};
++struct lkpi_sta {
++    struct ieee80211_hw *hw;
++    struct ieee80211_node *ni;
++    struct lkpi_sta_port port;
++    unsigned port_key_busy, port_open;
++    bool locked, guarded;
++};
++struct lkpi_sta_m4 { uint64_t replay; uint32_t epoch; };
++struct m_tag { size_t m_tag_len; };
++struct mbuf {
++    struct { unsigned len; struct { void *ptr; } PH_loc; } m_pkthdr;
++    struct m_tag *tag;
++    uint8_t data[256];
++};
++struct sk_buff { void *m; };
++struct ieee80211_frame {
++    uint8_t i_fc[2], duration[2], i_addr1[6], i_addr2[6], i_addr3[6], seq[2];
++};
++#define STA_TO_LSTA(s) ((s)->lsta)
++#define ieee80211_hw_check(h,f) ((void)(f), (h)->gated)
++static bool lkpi_sta_port_enabled(struct lkpi_sta *s) { return s->guarded; }
++static unsigned ieee80211_anyhdrsize(struct ieee80211_frame *f)
++{ (void)f; return sizeof(*f); }
++static void m_copydata(struct mbuf *m, unsigned off, unsigned n, void *out)
++{ assert(off + n <= m->m_pkthdr.len); memcpy(out, m->data + off, n); }
++static struct m_tag *m_tag_locate(struct mbuf *m, unsigned cookie, int id, void *p)
++{
++    assert(cookie == MTAG_ABI_LKPI80211 && id == LKPI80211_TAG_M4 && !p);
++    return m->tag;
++}
++"""
++
++TEST = r"""
++int main(void)
++{
++    struct ieee80211_hw hw = { .gated = true };
++    struct ieee80211_node ni = {};
++    struct lkpi_sta sta = { .hw = &hw, .ni = &ni, .guarded = true };
++    struct { struct m_tag tag; struct lkpi_sta_m4 token; } tagged = {};
++    struct mbuf m = { .m_pkthdr.len = sizeof(struct ieee80211_frame) + 8 + 99,
++        .m_pkthdr.PH_loc.ptr = &ni, .tag = &tagged.tag };
++    struct sk_buff skb = { .m = &m };
++    ni.ni_drv_data = &sta;
++    m.data[0] = 8; m.data[1] = 1;
++    const uint8_t llc[] = { 0xaa, 0xaa, 3, 0, 0, 0, 0x88, 0x8e };
++    memcpy(m.data + sizeof(struct ieee80211_frame), llc, sizeof(llc));
++    uint8_t *e = m.data + sizeof(struct ieee80211_frame) + sizeof(llc);
++    e[0] = 2; e[1] = 3; e[3] = 95; e[4] = 2; e[5] = 3; e[6] = 0x0a;
++    e[16] = 42;
++    uint8_t nonce[32] = { 1 };
++    assert(lkpi_sta_port_m3(&sta.port, 42, nonce));
++    tagged.tag.m_tag_len = sizeof(tagged.token);
++    tagged.token.epoch = sta.port.epoch; tagged.token.replay = 42;
++    assert(lkpi_sta_m4_check(&sta, &m));
++    lkpi_sta_port_key(&sta.port, 0, true, true, true);
++    lkpi_sta_port_key(&sta.port, 1, false, true, true);
++    assert(lkpi_sta_m4_check(&sta, &m));
++    assert(!lkpi_sta_port_ready(&sta.port));
++
++    for (int scenario = 0; scenario < 10; scenario++) {
++        struct lkpi_sta saved = sta;
++        struct mbuf saved_m = m;
++        if (scenario == 0) tagged.token.epoch--;
++        if (scenario == 1) tagged.token.replay--;
++        if (scenario == 2) e[16]--;
++        if (scenario == 3) sta.port.failed = true;
++        if (scenario == 4) sta.port_key_busy = 1;
++        if (scenario == 5) m.tag = NULL;
++        if (scenario == 6) tagged.tag.m_tag_len--;
++        if (scenario == 7) m.data[1] = IEEE80211_FC1_DIR_FROMDS;
++        if (scenario == 8) m.m_pkthdr.len = sizeof(struct ieee80211_frame) + 8;
++        if (scenario == 9) e[5] = 1;
++        assert(!lkpi_sta_m4_check(&sta, &m));
++        sta = saved; m = saved_m;
++        tagged.token.epoch = sta.port.epoch; tagged.token.replay = 42;
++        tagged.tag.m_tag_len = sizeof(tagged.token);
++        e = m.data + sizeof(struct ieee80211_frame) + sizeof(llc);
++    }
++    assert(linuxkpi_ieee80211_sta_tx_permitted(&hw, NULL, &skb));
++    assert(lkpi_sta_port_m3(&sta.port, 43, nonce));
++    assert(!linuxkpi_ieee80211_sta_tx_permitted(&hw, NULL, &skb));
++    tagged.token.epoch = sta.port.epoch; tagged.token.replay = 43; e[16] = 43;
++    assert(linuxkpi_ieee80211_sta_tx_permitted(&hw, NULL, &skb));
++    assert(!lkpi_sta_port_ready(&sta.port));
++    assert(!lkpi_sta_port_ack(&sta.port, sta.port.epoch - 1, 42));
++    assert(lkpi_sta_port_ack(&sta.port, sta.port.epoch, 43));
++    assert(lkpi_sta_port_ready(&sta.port));
++    puts("production M4 token: parser/tags, stale TX rejection, key fence and strict ACK gate passed");
++    return 0;
++}
++"""
++
++
++def main():
++    source = (KERNEL / "linux_80211.c").read_text()
++    code = PRELUDE
++    for name in ("lkpi_sta_eapol", "lkpi_sta_m4_check", "lkpi_sta_tx_allowed",
++                 "linuxkpi_ieee80211_sta_tx_permitted"):
++        code += function(source, name)
++    with tempfile.TemporaryDirectory(prefix="station-m4-token-") as temp:
++        path = pathlib.Path(temp)
++        (path / "test.c").write_text(code + TEST)
++        subprocess.run(
++            ["/usr/bin/cc", "-Wall", "-Wextra", "-Werror",
++             "-fsanitize=address,undefined", "-fno-sanitize-recover=all",
++             "-I", str(KERNEL), str(path / "test.c"), "-o", str(path / "test")],
++            check=True)
++        subprocess.run([str(path / "test")], check=True, timeout=10)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/sys/tests/linuxkpi_wlan/station_port_test.c b/sys/tests/linuxkpi_wlan/station_port_test.c
+index 569b964d..76c83f54 100644
+--- a/sys/tests/linuxkpi_wlan/station_port_test.c
++++ b/sys/tests/linuxkpi_wlan/station_port_test.c
+@@ -118,61 +118,13 @@ station_port_test(void)
+ 	lkpi_sta_port_reset(&p);
+ 	CHECK(!lkpi_sta_port_ack(&p, epoch, 11));
+ 
+-	/* The opt-in initial exchange needs real key proof, but no invented ACK. */
+-	lkpi_sta_port_init(&p, true);
+-	CHECK(!lkpi_sta_port_publish(&p));
++	/* A fresh association needs its own ACK even after successful key setup. */
+ 	CHECK(lkpi_sta_port_m3(&p, 12, nonce));
+-	CHECK(!lkpi_sta_port_publish(&p));
+ 	lkpi_sta_port_key(&p, 0, true, true, true);
+-	CHECK(!lkpi_sta_port_publish(&p));
+ 	lkpi_sta_port_key(&p, 1, false, true, true);
+-	CHECK(!p.acked && lkpi_sta_port_publish(&p));
+-	CHECK(!p.acked && lkpi_sta_port_ready(&p));
+-	/* Same-exchange retries retain keys and policy, not stale ACK tokens. */
+-	epoch = p.epoch;
+-	CHECK(lkpi_sta_port_m3(&p, 13, nonce));
+-	CHECK(!lkpi_sta_port_ack(&p, epoch, 12));
+-	CHECK(!p.acked && lkpi_sta_port_publish(&p));
+-	/* GTK rotation does not invent another pairwise handshake. */
+-	lkpi_sta_port_key(&p, 2, false, true, true);
+-	lkpi_sta_port_key(&p, 1, false, false, true);
+-	CHECK(!p.acked && lkpi_sta_port_publish(&p));
+-	/* A new PTK exchange after publication is strict, even with policy on. */
+-	nonce[0]++;
+-	CHECK(lkpi_sta_port_m3(&p, 14, nonce));
+-	lkpi_sta_port_key(&p, 0, true, true, true);
+-	lkpi_sta_port_key(&p, 2, false, true, true);
+-	CHECK(!lkpi_sta_port_publish(&p));
+-	CHECK(lkpi_sta_port_ack(&p, p.epoch, 14));
+-	CHECK(lkpi_sta_port_publish(&p));
+-	/* Removal/unauthorize cannot revive the consumed initial exception. */
+-	lkpi_sta_port_key(&p, 0, true, false, true);
+-	nonce[0]++;
+-	CHECK(lkpi_sta_port_m3(&p, 15, nonce));
+-	lkpi_sta_port_key(&p, 0, true, true, true);
+-	lkpi_sta_port_key(&p, 2, false, true, true);
+-	CHECK(!lkpi_sta_port_publish(&p));
+-	lkpi_sta_port_reset(&p);
+-	nonce[0]++;
+-	CHECK(lkpi_sta_port_m3(&p, 16, nonce));
+-	lkpi_sta_port_key(&p, 0, true, true, true);
+-	lkpi_sta_port_key(&p, 2, false, true, true);
+-	CHECK(!lkpi_sta_port_publish(&p));
+-	/* Failed commands remain terminal for the current exchange. */
+-	lkpi_sta_port_init(&p, true);
+-	CHECK(lkpi_sta_port_m3(&p, 17, nonce));
+-	lkpi_sta_port_key(&p, 0, true, true, true);
+-	lkpi_sta_port_key(&p, 1, false, true, false);
+-	lkpi_sta_port_key(&p, 1, false, true, true);
+-	CHECK(!lkpi_sta_port_publish(&p) && !p.acked);
+-	/* A fresh default-off association cannot inherit an earlier exception. */
+-	lkpi_sta_port_init(&p, false);
+-	CHECK(lkpi_sta_port_m3(&p, 18, nonce));
+-	lkpi_sta_port_key(&p, 0, true, true, true);
+-	lkpi_sta_port_key(&p, 1, false, true, true);
+-	CHECK(!lkpi_sta_port_publish(&p));
+-	CHECK(lkpi_sta_port_ack(&p, p.epoch, 18));
+-	CHECK(lkpi_sta_port_publish(&p));
++	CHECK(!lkpi_sta_port_ready(&p));
++	CHECK(lkpi_sta_port_ack(&p, p.epoch, 12));
++	CHECK(lkpi_sta_port_ready(&p));
+ 
+ 	/* Real RSN EAPOL-Key fixed-header parsing, no mock decoder. */
+ 	key_frame(e, 0x03ca, 0x0102030405060708ULL);
+diff --git a/sys/tests/linuxkpi_wlan/station_port_policy_test.py b/sys/tests/linuxkpi_wlan/station_port_worker_test.py
+similarity index 91%
+rename from sys/tests/linuxkpi_wlan/station_port_policy_test.py
+rename to sys/tests/linuxkpi_wlan/station_port_worker_test.py
+index 748d1bbc..ae255db4 100644
+--- a/sys/tests/linuxkpi_wlan/station_port_policy_test.py
++++ b/sys/tests/linuxkpi_wlan/station_port_worker_test.py
+@@ -1,5 +1,5 @@
+ #!/usr/bin/env python3
+-"""Exercise the real controlled-port worker with the initial ACK experiment."""
++"""Exercise the real controlled-port worker and its strict M4 ACK gate."""
+ 
+ import pathlib
+ import subprocess
+@@ -98,7 +98,7 @@
+ int main(void)
+ {
+     uint8_t nonce[32] = { 1 };
+-    for (int scenario = 0; scenario < 18; scenario++) {
++    for (int scenario = 0; scenario < 17; scenario++) {
+         struct wiphy w = { .reg_allowed = true };
+         struct ieee80211_hw hw = { .wiphy = &w };
+         struct lkpi_hw lhw = { .hw = &hw };
+@@ -111,10 +111,12 @@
+             .state = IEEE80211_STA_ASSOC };
+         vif.iv_vap.lvif = &vif; vif.iv_vap.iv_ifp = &vif;
+         vif.lvif_bss = &sta;
+-        lkpi_sta_port_init(&sta.port, scenario != 1);
++        lkpi_sta_port_reset(&sta.port);
+         assert(lkpi_sta_port_m3(&sta.port, 42, nonce));
+         lkpi_sta_port_key(&sta.port, 0, true, true, true);
+         lkpi_sta_port_key(&sta.port, 1, false, true, true);
++        if (scenario != 1)
++            assert(lkpi_sta_port_ack(&sta.port, sta.port.epoch, 42));
+         inject = 0; authorizations = publications = 0;
+         link_state = LINK_STATE_DOWN;
+         if (scenario == 2) sta.port.pairwise = 0;
+@@ -128,24 +130,20 @@
+         if (scenario == 10) vif.port_dead = 1;
+         if (scenario == 11) sta.guarded = false;
+         if (scenario >= 12 && scenario <= 16) inject = scenario - 11;
+-        if (scenario == 17) {
+-            assert(lkpi_sta_port_ack(&sta.port, sta.port.epoch, 42));
+-            sta.port.no_ack = false;
+-        }
+         lkpi_sta_port_task(&vif, 0);
+-        bool success = scenario == 0 || scenario == 17;
++        bool success = scenario == 0;
+         assert(!w.locked && !sta.locked);
+         assert(sta.port_open == success && publications == success);
+         assert((link_state == LINK_STATE_UP) == success);
+         assert(((ni.ni_flags & IEEE80211_NODE_AUTH) != 0) == success);
+-        assert(sta.port.acked == (scenario == 17));
++        assert(sta.port.acked == (scenario != 1));
+         assert(authorizations == (success || scenario >= 12 ? 1U : 0U));
+         if (scenario == 12) assert(sta.port.failed);
+         if (!success) continue;
+         /* Repeated worker execution cannot close the opened initial port. */
+         lkpi_sta_port_task(&vif, 0);
+         assert(sta.port_open && authorizations == 1);
+-        /* A new PTK exchange consumes no exception and needs its own ACK. */
++        /* A new PTK exchange needs its own matching ACK. */
+         uint8_t other[32] = { 2 };
+         assert(lkpi_sta_port_m3(&sta.port, 43, other));
+         sta.port_open = 0;
+@@ -157,7 +155,7 @@
+         lkpi_sta_port_task(&vif, 0);
+         assert(sta.port_open && authorizations == 2);
+     }
+-    puts("production port worker: opt-in ACK policy, firmware failures, epoch/regulatory/key fencing and strict rekey passed");
++    puts("production port worker: strict ACK gate, firmware failures, epoch/regulatory/key fencing and rekey passed");
+     return 0;
+ }
+ """
+@@ -167,7 +165,7 @@ def main():
+     source = (KERNEL / "linux_80211.c").read_text()
+     code = PRELUDE + function(source, "lkpi_sta_port_close")
+     code += function(source, "lkpi_sta_port_task") + TEST
+-    with tempfile.TemporaryDirectory(prefix="station-port-policy-") as temp:
++    with tempfile.TemporaryDirectory(prefix="station-port-worker-") as temp:
+         path = pathlib.Path(temp)
+         (path / "test.c").write_text(code)
+         subprocess.run(
+diff --git a/sys/tests/linuxkpi_wlan/station_tx_de_stats_test.py b/sys/tests/linuxkpi_wlan/station_tx_de_stats_test.py
+deleted file mode 100644
+index 930f952e..00000000
+--- a/sys/tests/linuxkpi_wlan/station_tx_de_stats_test.py
++++ /dev/null
+@@ -1,227 +0,0 @@
+-#!/usr/bin/env python3
+-"""Exercise the production counters-only HTT diagnostic with ASan/UBSan."""
+-
+-import pathlib
+-import re
+-import subprocess
+-import tempfile
+-
+-from regulatory_production_test import function
+-
+-
+-ROOT = pathlib.Path(__file__).resolve().parents[3]
+-ATH12K = ROOT / "sys/contrib/dev/athk/ath12k"
+-TYPES = {
+-    "CMN": "cmn",
+-    "EAPOL_PACKETS": "eapol_packets",
+-    "CLASSIFY_FAILED": "classify_failed",
+-    "CLASSIFY_STATS": "classify",
+-    "CLASSIFY_STATUS": "classify_status",
+-    "ENQUEUE_PACKETS": "enqueue_packets",
+-    "ENQUEUE_DISCARD": "enqueue_discard",
+-    "COMPL_STATS": "compl",
+-}
+-
+-PRELUDE = r"""
+-#include <assert.h>
+-#include <errno.h>
+-#include <stdbool.h>
+-#include <stdint.h>
+-#include <stdarg.h>
+-#include <stdio.h>
+-#include <string.h>
+-typedef uint8_t u8;
+-typedef uint16_t u16;
+-typedef uint32_t u32;
+-typedef uint64_t u64;
+-typedef uint32_t __le32;
+-typedef uint64_t __le64;
+-#ifndef __packed
+-#define __packed __attribute__((packed))
+-#endif
+-#define READ_ONCE(x) (x)
+-#define BIT(n) (1U << (n))
+-#define GENMASK(h,l) ((UINT32_MAX >> (31-(h))) & (UINT32_MAX << (l)))
+-#define le32_to_cpu(x) (x)
+-#define le64_to_cpu(x) (x)
+-#define u32_get_bits(v,m) (((v) & (m)) >> __builtin_ctz(m))
+-#define le32_get_bits(v,m) u32_get_bits(v,m)
+-#define HTT_TLV_TAG GENMASK(11,0)
+-#define HTT_TLV_LEN GENMASK(23,12)
+-struct htt_tlv { __le32 header; u8 value[]; } __packed;
+-struct ath12k_base { int unused; };
+-struct ath12k { struct ath12k_base *ab; };
+-struct sk_buff { unsigned len; u8 *data; };
+-struct htt_ext_stats_cfg_params { u32 cfg0, cfg1, cfg2, cfg3; };
+-static bool ath12k_tx_de_stats = true;
+-static char output[16384];
+-static unsigned output_len, warnings, requests;
+-static int request_error;
+-static void log_message(const char *fmt, ...) {
+-    va_list ap;
+-    va_start(ap, fmt);
+-    int n = vsnprintf(output + output_len, sizeof(output) - output_len, fmt, ap);
+-    va_end(ap);
+-    assert(n >= 0 && (unsigned)n < sizeof(output) - output_len);
+-    output_len += n;
+-}
+-#define ath12k_info(ab,...) ((void)(ab), log_message(__VA_ARGS__))
+-#define ath12k_warn(ab,...) ((void)(ab), warnings++, log_message(__VA_ARGS__))
+-#define ath12k_err(ab,...) ath12k_warn(ab,__VA_ARGS__)
+-static int scnprintf(char *dst, size_t len, const char *fmt, ...) {
+-    va_list ap;
+-    va_start(ap, fmt);
+-    int n = vsnprintf(dst, len, fmt, ap);
+-    va_end(ap);
+-    assert(n >= 0);
+-    return len == 0 ? 0 : (size_t)n < len ? n : (int)len - 1;
+-}
+-static void reset(void) { output_len = warnings = 0; output[0] = 0; }
+-static int ath12k_dp_tx_htt_h2t_ext_stats_req(struct ath12k *ar, u8 type,
+-    struct htt_ext_stats_cfg_params *cfg, u64 cookie);
+-"""
+-
+-TEST = r"""
+-static int ath12k_dp_tx_htt_h2t_ext_stats_req(struct ath12k *ar, u8 type,
+-    struct htt_ext_stats_cfg_params *cfg, u64 cookie)
+-{
+-    assert(ar && type == ATH12K_DBG_HTT_EXT_STATS_TX_DE_INFO);
+-    assert(cookie == ATH12K_HTT_NATIVE_TX_DE_COOKIE);
+-    assert(!cfg->cfg0 && !cfg->cfg1 && !cfg->cfg2 && !cfg->cfg3);
+-    requests++;
+-    return request_error;
+-}
+-
+-int main(void)
+-{
+-    struct ath12k_base ab = {};
+-    struct ath12k ar = { .ab = &ab };
+-    u8 bytes[2048] = {};
+-    struct ath12k_htt_extd_stats_msg *msg = (void *)bytes;
+-    struct sk_buff skb = { .data = bytes, .len = sizeof(*msg) };
+-    const unsigned sizes[] = {
+-        sizeof(struct ath12k_htt_tx_de_cmn_stats_tlv),
+-        sizeof(struct ath12k_htt_tx_de_eapol_packets_stats_tlv),
+-        sizeof(struct ath12k_htt_tx_de_classify_failed_stats_tlv),
+-        sizeof(struct ath12k_htt_tx_de_classify_stats_tlv),
+-        sizeof(struct ath12k_htt_tx_de_classify_status_stats_tlv),
+-        sizeof(struct ath12k_htt_tx_de_enqueue_packets_stats_tlv),
+-        sizeof(struct ath12k_htt_tx_de_enqueue_discard_stats_tlv),
+-        sizeof(struct ath12k_htt_tx_de_compl_stats_tlv)
+-    };
+-    const unsigned tags[] = {
+-        HTT_STATS_TX_DE_CMN_TAG, HTT_STATS_TX_DE_EAPOL_PACKETS_TAG,
+-        HTT_STATS_TX_DE_CLASSIFY_FAILED_TAG, HTT_STATS_TX_DE_CLASSIFY_STATS_TAG,
+-        HTT_STATS_TX_DE_CLASSIFY_STATUS_TAG, HTT_STATS_TX_DE_ENQUEUE_PACKETS_TAG,
+-        HTT_STATS_TX_DE_ENQUEUE_DISCARD_TAG, HTT_STATS_TX_DE_COMPL_STATS_TAG
+-    };
+-    msg->cookie = ATH12K_HTT_NATIVE_TX_DE_COOKIE;
+-    struct htt_tlv *tlv = (void *)msg->data;
+-    for (unsigned t = 0; t < sizeof(tags)/sizeof(tags[0]); t++) {
+-        memset(msg->data, 0xff, 512);
+-        tlv->header = tags[t] | (sizes[t] << 12);
+-        msg->info1 = 8 | BIT(11) | ((4 + sizes[t]) << 16);
+-        skb.len = sizeof(*msg) + 4 + sizes[t];
+-        reset();
+-        assert(ath12k_htt_native_tx_de_stats_handler(&ab, &skb));
+-        assert(warnings == 0 && strstr(output, "done=1"));
+-        assert(strstr(output, "counters=4294967295"));
+-        unsigned count = 0;
+-        for (char *p = output; (p = strstr(p, "4294967295")) != NULL; p += 10)
+-            count++;
+-        assert(count == sizes[t] / 4);
+-        /* New opaque suffixes must not be logged as additional counters. */
+-        memcpy(tlv->value + sizes[t], "PRIVATE", 8);
+-        tlv->header += 8 << 12; msg->info1 += 8 << 16; skb.len += 8;
+-        reset();
+-        assert(ath12k_htt_native_tx_de_stats_handler(&ab, &skb));
+-        assert(!warnings && !strstr(output, "PRIVATE"));
+-        /* Known short TLVs must be rejected without reading their fields. */
+-        tlv->header = tags[t] | ((sizes[t] - 1) << 12);
+-        msg->info1 = 8 | ((sizes[t] + 3) << 16);
+-        skb.len = sizeof(*msg) + sizes[t] + 3;
+-        reset();
+-        assert(ath12k_htt_native_tx_de_stats_handler(&ab, &skb));
+-        assert(warnings && !strstr(output, "counters="));
+-    }
+-    /* Truncated headers, forged payload lengths, and unsupported responses. */
+-    for (unsigned n = 0; n < sizeof(*msg); n++) {
+-        skb.len = n; reset();
+-        assert(ath12k_htt_native_tx_de_stats_handler(&ab, &skb));
+-        assert(warnings && !strstr(output, "counters="));
+-    }
+-    skb.len = sizeof(*msg);
+-    for (unsigned scenario = 0; scenario < 3; scenario++) {
+-        msg->info1 = scenario == 0 ? 8 | (4 << 16) :
+-            scenario == 1 ? 8 | (3 << 8) : 9;
+-        reset();
+-        assert(ath12k_htt_native_tx_de_stats_handler(&ab, &skb));
+-        assert(warnings && !strstr(output, "counters="));
+-    }
+-    /* Unknown TLVs contain no permitted diagnostic data. */
+-    tlv->header = 4095 | (8 << 12);
+-    memcpy(tlv->value, "PRIVATE", 8);
+-    msg->info1 = 8 | (12 << 16);
+-    skb.len = sizeof(*msg) + 12; reset();
+-    assert(ath12k_htt_native_tx_de_stats_handler(&ab, &skb));
+-    assert(!warnings && !strstr(output, "counters=") && !strstr(output, "PRIVATE"));
+-    /* Partial packets are explicit; their valid TLVs can still be consumed. */
+-    msg->info1 |= BIT(8); reset();
+-    assert(ath12k_htt_native_tx_de_stats_handler(&ab, &skb));
+-    assert(!warnings && strstr(output, "status=1 done=0"));
+-    /* Disabled and unrelated-cookie responses do not publish diagnostics. */
+-    ath12k_tx_de_stats = false; reset();
+-    assert(ath12k_htt_native_tx_de_stats_handler(&ab, &skb) && !output_len);
+-    ath12k_tx_de_stats = true; msg->cookie = 0; reset();
+-    assert(!ath12k_htt_native_tx_de_stats_handler(&ab, &skb) && !output_len);
+-    msg->cookie = ATH12K_HTT_NATIVE_TX_DE_COOKIE;
+-    /* A TLV that claims more bytes than the message contains fails safely. */
+-    msg->info1 = 8 | (4 << 16); tlv->header = 17 | (100 << 12);
+-    skb.len = sizeof(*msg) + 4; reset();
+-    assert(ath12k_htt_native_tx_de_stats_handler(&ab, &skb) && warnings);
+-    assert(!strstr(output, "counters="));
+-    reset();
+-    ath12k_dp_htt_native_tx_de_stats_request(&ar);
+-    assert(requests == 1 && !warnings);
+-    request_error = -ENOMEM; reset();
+-    ath12k_dp_htt_native_tx_de_stats_request(&ar);
+-    assert(requests == 2 && warnings && strstr(output, "request failed"));
+-    puts("TX_DE production request/parser: whitelist, lengths, privacy, partial/error responses passed");
+-    return 0;
+-}
+-"""
+-
+-
+-def main():
+-    source = (ATH12K / "dp_htt.c").read_text()
+-    header = (ATH12K / "debugfs_htt_stats.h").read_text()
+-    code = PRELUDE
+-    code += re.search(r"#define ATH12K_HTT_NATIVE_TX_DE_COOKIE .+", source)[0] + "\n"
+-    for name, suffix in TYPES.items():
+-        tag = "HTT_STATS_TX_DE_" + name + "_TAG"
+-        value = re.search(r"\b" + tag + r"\s*=\s*(\d+)", header)[1]
+-        code += f"#define {tag} {value}\n"
+-        struct = "ath12k_htt_tx_de_" + suffix + "_stats_tlv"
+-        code += re.search(r"struct " + struct + r" \{[^}]*\} __packed;", header)[0] + "\n"
+-    for macro in ("ATH12K_HTT_T2H_EXT_STATS_INFO1_DONE",
+-                  "ATH12K_HTT_T2H_EXT_STATS_INFO1_LENGTH"):
+-        code += re.search(r"#define " + macro + r"[^\n]*", header)[0] + "\n"
+-    code += "#define ATH12K_DBG_HTT_EXT_STATS_TX_DE_INFO 8\n"
+-    code += re.search(r"struct ath12k_htt_extd_stats_msg \{[^}]*\} __packed;", header)[0] + "\n"
+-    for name in ("ath12k_dp_htt_tlv_iter", "ath12k_htt_native_tx_de_parse",
+-                 "ath12k_htt_native_tx_de_stats_handler",
+-                 "ath12k_dp_htt_native_tx_de_stats_request"):
+-        code += function(source, name)
+-    code += TEST
+-    with tempfile.TemporaryDirectory(prefix="station-tx-de-") as temp:
+-        cfile = pathlib.Path(temp) / "test.c"
+-        binary = pathlib.Path(temp) / "test"
+-        cfile.write_text(code)
+-        subprocess.run(
+-            ["/usr/bin/cc", "-Wall", "-Wextra", "-Werror", "-fsanitize=address,undefined",
+-             "-fno-sanitize-recover=all", str(cfile), "-o", str(binary)], check=True)
+-        subprocess.run([str(binary)], check=True, timeout=10)
+-
+-
+-if __name__ == "__main__":
+-    main()
+-- 
+2.56.0
+

@@ -1,0 +1,120 @@
+From 3c82847af3dd41f7138a54edf765d9d4dd284349 Mon Sep 17 00:00:00 2001
+From: dcasati <dcasati@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 20:57:22 -0600
+Subject: [PATCH 6/6] tools: add rc.d script for ath12k wlan0 bring-up
+
+rc.conf's wlans_<parent> parser rejects ath12k_wifi70, so create
+wlan0, run wpa_supplicant and dhclient from a dedicated rc script.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+---
+ tools/tools/ath12k/ath12k_wlan.rc | 97 +++++++++++++++++++++++++++++++
+ 1 file changed, 97 insertions(+)
+ create mode 100755 tools/tools/ath12k/ath12k_wlan.rc
+
+diff --git a/tools/tools/ath12k/ath12k_wlan.rc b/tools/tools/ath12k/ath12k_wlan.rc
+new file mode 100755
+index 00000000..e6fdd96a
+--- /dev/null
++++ b/tools/tools/ath12k/ath12k_wlan.rc
+@@ -0,0 +1,97 @@
++#!/bin/sh
++#
++# PROVIDE: ath12k_wlan
++# REQUIRE: NETWORKING
++# BEFORE: LOGIN
++# KEYWORD: shutdown
++#
++# Bring up the Qualcomm WCN7850 (ath12k) station interface.
++# rc.conf's wlans_<parent> parser rejects "ath12k_wifi70" (underscore),
++# so the interface is created here.
++#
++# ath12k_wlan_enable="YES"
++# ath12k_wlan_if="wlan0"
++# ath12k_wlan_conf="/etc/wpa_supplicant-ath12k.conf"
++# ath12k_wlan_kernel="/boot/kernel.ath12k-*/kernel"  (glob)
++# ath12k_wlan_dhcp="YES"
++
++. /etc/rc.subr
++
++name="ath12k_wlan"
++rcvar="ath12k_wlan_enable"
++start_cmd="${name}_start"
++stop_cmd="${name}_stop"
++status_cmd="${name}_status"
++extra_commands="status"
++
++load_rc_config $name
++: ${ath12k_wlan_enable:="NO"}
++: ${ath12k_wlan_if:="wlan0"}
++: ${ath12k_wlan_conf:="/etc/wpa_supplicant-ath12k.conf"}
++: ${ath12k_wlan_kernel:="/boot/kernel.ath12k-*/kernel"}
++: ${ath12k_wlan_dhcp:="YES"}
++
++parent="ath12k_wifi70"
++wpa_pid="/var/run/wpa_supplicant.${ath12k_wlan_if}.pid"
++dhc_pid="/var/run/dhclient/dhclient.${ath12k_wlan_if}.pid"
++
++ath12k_wlan_start()
++{
++	local i
++
++	# The module depends on this kernel's LinuxKPI; never load it elsewhere.
++	case "$(sysctl -n kern.bootfile)" in
++	${ath12k_wlan_kernel}) ;;
++	*)
++		warn "not booted from ${ath12k_wlan_kernel}; skipping"
++		return 1
++		;;
++	esac
++	kldload -n ath12k_wcn7850_fw if_ath12k || return 1
++	i=0
++	while ! sysctl -n net.wlan.devices | grep -qw "${parent}"; do
++		i=$((i + 1))
++		if [ $i -gt 60 ]; then
++			warn "${parent} did not register"
++			return 1
++		fi
++		sleep 1
++	done
++	if ! ifconfig "${ath12k_wlan_if}" >/dev/null 2>&1; then
++		ifconfig "${ath12k_wlan_if}" create wlandev "${parent}" || return 1
++	fi
++	ifconfig "${ath12k_wlan_if}" up
++	if ! pgrep -F "${wpa_pid}" >/dev/null 2>&1; then
++		/usr/sbin/wpa_supplicant -B -i "${ath12k_wlan_if}" \
++		    -c "${ath12k_wlan_conf}" -P "${wpa_pid}" || return 1
++	fi
++	if checkyesno ath12k_wlan_dhcp && ! pgrep -F "${dhc_pid}" >/dev/null 2>&1; then
++		/sbin/dhclient -b "${ath12k_wlan_if}"
++	fi
++	echo "${ath12k_wlan_if} started on ${parent}."
++}
++
++ath12k_wlan_stop()
++{
++	# Interface teardown only; the driver stays loaded.
++	[ -f "${dhc_pid}" ] && pkill -F "${dhc_pid}"
++	[ -f "${wpa_pid}" ] && pkill -F "${wpa_pid}"
++	sleep 1
++	if ifconfig "${ath12k_wlan_if}" >/dev/null 2>&1; then
++		ifconfig "${ath12k_wlan_if}" down
++		ifconfig "${ath12k_wlan_if}" destroy
++	fi
++	rm -f "${wpa_pid}"
++}
++
++ath12k_wlan_status()
++{
++	if ! ifconfig "${ath12k_wlan_if}" >/dev/null 2>&1; then
++		echo "${ath12k_wlan_if} not present"
++		return 1
++	fi
++	ifconfig "${ath12k_wlan_if}" | grep -E 'status:|inet '
++	wpa_cli -i "${ath12k_wlan_if}" status 2>/dev/null | grep '^wpa_state='
++}
++
++run_rc_command "$1"
+-- 
+2.56.0
+
