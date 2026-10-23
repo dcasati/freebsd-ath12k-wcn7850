@@ -25,7 +25,9 @@ make buildkernel KERNCONF=GENERIC
 make installkernel KERNCONF=GENERIC KODIR=/boot/kernel.ath12k
 ```
 
-Firmware: install the WCN7850 firmware package (`wifi-firmware-ath12k-kmod-wcn7850_hw20`) and load it before `if_ath12k`.
+Firmware: the driver reads the raw images from `/boot/firmware/ath12k/WCN7850/hw2.0/`. Do not also `kldload` the firmware kld (`ath12k_wcn7850_fw`). `devmatch` loads `if_ath12k` early in boot, so the kld then fails with `firmware_register: ... already registered` / `MOD_LOAD ... error 6`. The `kldload: ... Unsupported file layout` lines at attach are harmless: firmware(9) probes each raw image as a kld before falling back to reading the file.
+
+Install `tools/ath12k_wlan.rc` as `/usr/local/etc/rc.d/ath12k_wlan` and set `ath12k_wlan_enable="YES"`. Keep backups out of `rc.d`: `rc` runs every file there except `*.bak`, `*.orig`, `*.OLD`, `*~` and `*,v`.
 
 Tunables (`/boot/loader.conf`):
 
