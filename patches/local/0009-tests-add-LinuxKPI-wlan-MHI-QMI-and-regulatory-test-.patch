@@ -1,4 +1,4 @@
-From 43cfbf7fbba97265cc7349e6c439660e9edb5be0 Mon Sep 17 00:00:00 2001
+From bf3c08bd26328b4ade65d26467e855c4d9154791 Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 14:44:31 -0600
 Subject: [PATCH 09/10] tests: add LinuxKPI wlan, MHI, QMI and regulatory test

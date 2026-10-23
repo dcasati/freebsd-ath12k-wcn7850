@@ -1,4 +1,4 @@
-From 1898c519b6fe6bc8a9a30410fcbadb4c47d1f4b4 Mon Sep 17 00:00:00 2001
+From 8dbef5056900e99f1ca10e686d59a0d07322ab28 Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 20:43:29 -0600
 Subject: [PATCH 7/7] ath12k: keep 4-way peers unauthorized on rate-update

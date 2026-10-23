@@ -1,4 +1,4 @@
-From a98d41a6f0a2abe56474edead6a8671723724be8 Mon Sep 17 00:00:00 2001
+From 4e890587abebc232802eecec170b0117b28fbb20 Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 14:44:30 -0600
 Subject: [PATCH 4/7] LinuxKPI: implement MHI host and QMI interfaces
@@ -12,8 +12,8 @@ Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
  .../linuxkpi/common/include/linux/mhi.h       |   63 +-
  .../common/include/linux/soc/qcom/qmi.h       |   62 +-
  sys/compat/linuxkpi/common/src/linux_mhi.c    | 1691 ++++++++++++++++-
- sys/compat/linuxkpi/common/src/linux_mhi.h    |  155 ++
- 4 files changed, 1928 insertions(+), 43 deletions(-)
+ sys/compat/linuxkpi/common/src/linux_mhi.h    |  179 ++
+ 4 files changed, 1952 insertions(+), 43 deletions(-)
  create mode 100644 sys/compat/linuxkpi/common/src/linux_mhi.h
 
 diff --git a/sys/compat/linuxkpi/common/include/linux/mhi.h b/sys/compat/linuxkpi/common/include/linux/mhi.h
@@ -2040,13 +2040,37 @@ index 5d3c391f91a..5a75c83457b 100644
  }
 diff --git a/sys/compat/linuxkpi/common/src/linux_mhi.h b/sys/compat/linuxkpi/common/src/linux_mhi.h
 new file mode 100644
-index 00000000000..957b718c38b
+index 00000000000..e0fb67e637c
 --- /dev/null
 +++ b/sys/compat/linuxkpi/common/src/linux_mhi.h
-@@ -0,0 +1,155 @@
+@@ -0,0 +1,179 @@
 +/*-
 + * SPDX-License-Identifier: BSD-2-Clause
++ *
++ * Copyright (c) 2026 Diego Casati <diego.casati@gmail.com>
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
 + */
++
 +#ifndef _LINUXKPI_MHI_INTERNAL_H_
 +#define _LINUXKPI_MHI_INTERNAL_H_
 +

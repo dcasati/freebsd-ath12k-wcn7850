@@ -1,4 +1,4 @@
-From dbe6994eb3c53675013bfef860017b44e0165542 Mon Sep 17 00:00:00 2001
+From ae16aa537a8e16a103fa4e83b6dbacd5eff1d97e Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 14:44:31 -0600
 Subject: [PATCH 6/7] ath12k: add WCN7850 support on FreeBSD
@@ -34,7 +34,7 @@ Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
  sys/contrib/dev/athk/ath12k/core.h            |  25 +
  sys/contrib/dev/athk/ath12k/dp.c              | 623 ++++++++++++++++++
  sys/contrib/dev/athk/ath12k/dp.h              |  62 ++
- sys/contrib/dev/athk/ath12k/dp_cc.h           |  56 ++
+ sys/contrib/dev/athk/ath12k/dp_cc.h           |  60 ++
  sys/contrib/dev/athk/ath12k/dp_cmn.h          |   4 +
  sys/contrib/dev/athk/ath12k/dp_htt.c          |  54 ++
  sys/contrib/dev/athk/ath12k/dp_mon.c          |   8 +
@@ -53,9 +53,9 @@ Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
  sys/contrib/dev/athk/ath12k/peer.c            |   4 +
  sys/contrib/dev/athk/ath12k/qmi.c             | 171 +++++
  sys/contrib/dev/athk/ath12k/qmi.h             |   6 +
- sys/contrib/dev/athk/ath12k/qmi_native.c      | 597 +++++++++++++++++
- sys/contrib/dev/athk/ath12k/qmi_native.h      |  30 +
- .../dev/athk/ath12k/qmi_native_codec.c        | 395 +++++++++++
+ sys/contrib/dev/athk/ath12k/qmi_native.c      | 623 ++++++++++++++++++
+ sys/contrib/dev/athk/ath12k/qmi_native.h      |  56 ++
+ .../dev/athk/ath12k/qmi_native_codec.c        | 421 ++++++++++++
  sys/contrib/dev/athk/ath12k/reg.c             | 464 +++++++++++++
  sys/contrib/dev/athk/ath12k/reg.h             |   4 +
  sys/contrib/dev/athk/ath12k/wifi7/core.c      |  17 +
@@ -70,7 +70,7 @@ Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
  sys/contrib/dev/athk/ath12k/wmi.c             | 581 ++++++++++++++++
  sys/contrib/dev/athk/ath12k/wmi.h             | 158 +++++
  sys/modules/ath12k/Makefile                   |   1 +
- 42 files changed, 4669 insertions(+)
+ 42 files changed, 4751 insertions(+)
  create mode 100644 sys/contrib/dev/athk/ath12k/dp_cc.h
  create mode 100644 sys/contrib/dev/athk/ath12k/qmi_native.c
  create mode 100644 sys/contrib/dev/athk/ath12k/qmi_native.h
@@ -1959,11 +1959,15 @@ index f8cfc7bb29d..f7a3f4e043c 100644
  {
 diff --git a/sys/contrib/dev/athk/ath12k/dp_cc.h b/sys/contrib/dev/athk/ath12k/dp_cc.h
 new file mode 100644
-index 00000000000..d16cdc7809b
+index 00000000000..57745d94e02
 --- /dev/null
 +++ b/sys/contrib/dev/athk/ath12k/dp_cc.h
-@@ -0,0 +1,56 @@
+@@ -0,0 +1,60 @@
 +/* SPDX-License-Identifier: BSD-3-Clause-Clear */
++/*
++ * Copyright (c) 2026 Diego Casati <diego.casati@gmail.com>
++ */
++
 +#ifndef ATH12K_DP_CC_H
 +#define ATH12K_DP_CC_H
 +
@@ -4329,11 +4333,37 @@ index b5a4a01391c..cf3de40e25d 100644
  void ath12k_qmi_firmware_stop(struct ath12k_base *ab);
 diff --git a/sys/contrib/dev/athk/ath12k/qmi_native.c b/sys/contrib/dev/athk/ath12k/qmi_native.c
 new file mode 100644
-index 00000000000..e10bd1d4784
+index 00000000000..3205cf93dc5
 --- /dev/null
 +++ b/sys/contrib/dev/athk/ath12k/qmi_native.c
-@@ -0,0 +1,597 @@
-+/* SPDX-License-Identifier: BSD-2-Clause */
+@@ -0,0 +1,623 @@
++/*-
++ * SPDX-License-Identifier: BSD-2-Clause
++ *
++ * Copyright (c) 2026 Diego Casati <diego.casati@gmail.com>
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
 +#include <sys/param.h>
 +#include <sys/endian.h>
 +#include <sys/kernel.h>
@@ -4932,11 +4962,37 @@ index 00000000000..e10bd1d4784
 +}
 diff --git a/sys/contrib/dev/athk/ath12k/qmi_native.h b/sys/contrib/dev/athk/ath12k/qmi_native.h
 new file mode 100644
-index 00000000000..b557a7a71ef
+index 00000000000..8c95b1fde73
 --- /dev/null
 +++ b/sys/contrib/dev/athk/ath12k/qmi_native.h
-@@ -0,0 +1,30 @@
-+/* SPDX-License-Identifier: BSD-2-Clause */
+@@ -0,0 +1,56 @@
++/*-
++ * SPDX-License-Identifier: BSD-2-Clause
++ *
++ * Copyright (c) 2026 Diego Casati <diego.casati@gmail.com>
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
 +#ifndef ATH12K_QMI_NATIVE_H
 +#define ATH12K_QMI_NATIVE_H
 +
@@ -4968,11 +5024,37 @@ index 00000000000..b557a7a71ef
 +#endif
 diff --git a/sys/contrib/dev/athk/ath12k/qmi_native_codec.c b/sys/contrib/dev/athk/ath12k/qmi_native_codec.c
 new file mode 100644
-index 00000000000..6666f070206
+index 00000000000..a67abb925ab
 --- /dev/null
 +++ b/sys/contrib/dev/athk/ath12k/qmi_native_codec.c
-@@ -0,0 +1,395 @@
-+/* SPDX-License-Identifier: BSD-2-Clause */
+@@ -0,0 +1,421 @@
++/*-
++ * SPDX-License-Identifier: BSD-2-Clause
++ *
++ * Copyright (c) 2026 Diego Casati <diego.casati@gmail.com>
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
 +#include <sys/param.h>
 +#include <sys/endian.h>
 +#include <sys/systm.h>
