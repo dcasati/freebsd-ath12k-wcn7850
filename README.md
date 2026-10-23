@@ -8,8 +8,7 @@ Status: station mode with WPA2-PSK works. Verified: unattended boot via rc.d, DH
 
 | Path | Contents |
 |------|----------|
-| `patches/0001-0008` | Patch series against freebsd-src `main` at `169e254b` (hardware-validated) |
-| `patches/pending/0009` | Removal of the M4/controlled-port experiment code. Unit-tested, **not yet validated on hardware** |
+| `patches/0001-0009` | Patch series against freebsd-src `main` at `169e254b` (hardware-validated) |
 | `tools/ath12k_wlan.rc` | rc.d script that brings up `wlan0` at boot (also included in patch 0006) |
 
 ## Apply and build
@@ -18,8 +17,6 @@ Status: station mode with WPA2-PSK works. Verified: unattended boot via rc.d, DH
 git clone https://github.com/freebsd/freebsd-src.git && cd freebsd-src
 git checkout -b ath12k-wcn7850 169e254b8440c010139b1351f46b70bc7ad3d5cb
 git am /path/to/freebsd-ath12k-wcn7850/patches/*.patch
-# optional, untested on hardware:
-# git am /path/to/freebsd-ath12k-wcn7850/patches/pending/*.patch
 
 make buildkernel KERNCONF=GENERIC
 make installkernel KERNCONF=GENERIC KODIR=/boot/kernel.ath12k
