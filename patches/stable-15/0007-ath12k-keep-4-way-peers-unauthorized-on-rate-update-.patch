@@ -1,0 +1,58 @@
+From 1898c519b6fe6bc8a9a30410fcbadb4c47d1f4b4 Mon Sep 17 00:00:00 2001
+From: dcasati <dcasati@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 20:43:29 -0600
+Subject: [PATCH 7/7] ath12k: keep 4-way peers unauthorized on rate-update
+ peer_assoc
+
+LinuxKPI issues a SUPP_RATES rate-control update right after
+association.  ath12k_sta_rc_update_wk() then re-sends WMI peer_assoc
+with is_assoc=false, so WMI_PEER_AUTH stays set next to
+NEED_PTK_4_WAY.  Firmware treats the 4-way handshake as complete and
+drops every EAPOL M4 (classify_failed.eapol_duplicate_m4).
+
+Clear auth_flag for that re-send while the peer is not yet authorized.
+Key installation authorizes it as usual.
+
+The same sequence may be reachable on Linux, so this should also be
+raised with linux-wireless.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+---
+ sys/contrib/dev/athk/ath12k/mac.c | 21 +++++++++++++++++++++
+ 1 file changed, 21 insertions(+)
+
+diff --git a/sys/contrib/dev/athk/ath12k/mac.c b/sys/contrib/dev/athk/ath12k/mac.c
+index b70f472e562..d4e09e790fc 100644
+--- a/sys/contrib/dev/athk/ath12k/mac.c
++++ b/sys/contrib/dev/athk/ath12k/mac.c
+@@ -6854,6 +6854,27 @@ static void ath12k_sta_rc_update_wk(struct wiphy *wiphy, struct wiphy_work *wk)
+ 						  peer_arg, true);
+ 
+ 			peer_arg->is_assoc = false;
++#if defined(__FreeBSD__)
++			/*
++			 * LinuxKPI issues SUPP_RATES rate updates around
++			 * association, before the 4-way handshake completes.
++			 * A non-assoc peer_assoc with auth_flag set would mark
++			 * the peer WMI_PEER_AUTH in firmware, which then
++			 * classifies every EAPOL M4 as a duplicate.  Keep the
++			 * peer unauthorized until key installation does it.
++			 */
++			if (peer_arg->need_ptk_4_way) {
++				struct ath12k_dp *dp = ath12k_ab_to_dp(ar->ab);
++				struct ath12k_dp_link_peer *peer;
++
++				spin_lock_bh(&dp->dp_lock);
++				peer = ath12k_dp_link_peer_find_by_vdev_and_addr(dp,
++				    arvif->vdev_id, arsta->addr);
++				if (!peer || !peer->is_authorized)
++					peer_arg->auth_flag = false;
++				spin_unlock_bh(&dp->dp_lock);
++			}
++#endif
+ 			err = ath12k_wmi_send_peer_assoc_cmd(ar, peer_arg);
+ 			if (err)
+ 				ath12k_warn(ar->ab, "failed to run peer assoc for STA %pM vdev %i: %d\n",
+-- 
+2.56.0
+

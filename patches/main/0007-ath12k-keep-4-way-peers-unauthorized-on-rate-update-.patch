@@ -1,17 +1,20 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From aa36a097aa87bb4c2db90d4a6a2389e363555737 Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 20:43:29 -0600
-Subject: [PATCH 08/14] ath12k: keep 4-way peers unauthorized on rate-update
+Subject: [PATCH 7/7] ath12k: keep 4-way peers unauthorized on rate-update
  peer_assoc
 
 LinuxKPI issues a SUPP_RATES rate-control update right after
-association.  ath12k_sta_rc_update_wk re-sends WMI peer_assoc with
-is_assoc=false, so WMI_PEER_AUTH stays set next to NEED_PTK_4_WAY.
-Firmware then treats the 4-way handshake as complete and drops every
-EAPOL M4 (classify_failed.eapol_duplicate_m4).
+association.  ath12k_sta_rc_update_wk() then re-sends WMI peer_assoc
+with is_assoc=false, so WMI_PEER_AUTH stays set next to
+NEED_PTK_4_WAY.  Firmware treats the 4-way handshake as complete and
+drops every EAPOL M4 (classify_failed.eapol_duplicate_m4).
 
-Clear auth_flag for that re-send while the peer is not yet authorized;
-key installation authorizes it as usual.
+Clear auth_flag for that re-send while the peer is not yet authorized.
+Key installation authorizes it as usual.
+
+The same sequence may be reachable on Linux, so this should also be
+raised with linux-wireless.
 
 Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
 ---
@@ -19,10 +22,10 @@ Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
  1 file changed, 21 insertions(+)
 
 diff --git a/sys/contrib/dev/athk/ath12k/mac.c b/sys/contrib/dev/athk/ath12k/mac.c
-index f2eade80..a1164052 100644
+index b70f472e562..d4e09e790fc 100644
 --- a/sys/contrib/dev/athk/ath12k/mac.c
 +++ b/sys/contrib/dev/athk/ath12k/mac.c
-@@ -6793,6 +6793,27 @@ static void ath12k_sta_rc_update_wk(struct wiphy *wiphy, struct wiphy_work *wk)
+@@ -6854,6 +6854,27 @@ static void ath12k_sta_rc_update_wk(struct wiphy *wiphy, struct wiphy_work *wk)
  						  peer_arg, true);
  
  			peer_arg->is_assoc = false;

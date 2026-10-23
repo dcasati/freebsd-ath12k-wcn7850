@@ -1,0 +1,2204 @@
+From a98d41a6f0a2abe56474edead6a8671723724be8 Mon Sep 17 00:00:00 2001
+From: dcasati <dcasati@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 14:44:30 -0600
+Subject: [PATCH 4/7] LinuxKPI: implement MHI host and QMI interfaces
+
+Add an MHI host implementation (BHI/BHIe firmware download, channel and
+event rings, M-state handling) and the linux/soc/qcom/qmi.h handle API
+used by ath12k.  The firmware boot sequence follows OpenBSD's qwz(4).
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+---
+ .../linuxkpi/common/include/linux/mhi.h       |   63 +-
+ .../common/include/linux/soc/qcom/qmi.h       |   62 +-
+ sys/compat/linuxkpi/common/src/linux_mhi.c    | 1691 ++++++++++++++++-
+ sys/compat/linuxkpi/common/src/linux_mhi.h    |  155 ++
+ 4 files changed, 1928 insertions(+), 43 deletions(-)
+ create mode 100644 sys/compat/linuxkpi/common/src/linux_mhi.h
+
+diff --git a/sys/compat/linuxkpi/common/include/linux/mhi.h b/sys/compat/linuxkpi/common/include/linux/mhi.h
+index 24b3205d6f5..ce980d6a22d 100644
+--- a/sys/compat/linuxkpi/common/include/linux/mhi.h
++++ b/sys/compat/linuxkpi/common/include/linux/mhi.h
+@@ -29,12 +29,17 @@
+ #define	_LINUXKPI_LINUX_MHI_H
+ 
+ #include <linux/types.h>
++#include <linux/errno.h>
++#include <linux/printk.h>
+ 
+ /* Modem Host Interface (MHI) */
+ 
+-/* XXX FIXME */
+-#define	MHI_DB_BRST_DISABLE	0
+-#define	MHI_ER_CTRL		0
++#define	MHI_DB_BRST_DISABLE	2
++#define	MHI_ER_DATA		0
++#define	MHI_ER_CTRL		1
++
++struct lkpi_mhi_context;
++struct lkpi_mhi_runtime;
+ 
+ enum mhi_callback {
+ 	MHI_CB_SYS_ERROR,
+@@ -70,6 +75,8 @@ struct mhi_controller_config {
+ };
+ 
+ struct mhi_controller {
++	struct lkpi_mhi_context		*lkpi_context;
++	struct lkpi_mhi_runtime		*lkpi_runtime;
+ 	struct device			*cntrl_dev;
+ 	struct mhi_device		*mhi_dev;
+ 	void				*regs;
+@@ -101,9 +108,34 @@ struct mhi_controller {
+ 
+ struct mhi_controller *linuxkpi_mhi_alloc_controller(void);
+ void linuxkpi_mhi_free_controller(struct mhi_controller *);
++void linuxkpi_mhi_free_context(struct mhi_controller *);
+ int linuxkpi_mhi_register_controller(struct mhi_controller *,
+     const struct mhi_controller_config *);
+ void linuxkpi_mhi_unregister_controller(struct mhi_controller *);
++int linuxkpi_mhi_prepare(struct mhi_controller *);
++int linuxkpi_mhi_power_up(struct mhi_controller *);
++void linuxkpi_mhi_power_down(struct mhi_controller *);
++void linuxkpi_mhi_unprepare(struct mhi_controller *);
++/*
++ * Lifecycle calls are caller-serialized. Power-down only stops event activity.
++ * Call reset_complete after an actual SoC reset, never instead of that reset.
++ * Failure requires retaining the PCI/MMIO owner, IRQs, controller and all DMA.
++ * Only a successful confirmation permits unprepare and upper-layer DMA free.
++ */
++int linuxkpi_mhi_reset_complete(struct mhi_controller *);
++bool linuxkpi_mhi_dma_owned(struct mhi_controller *);
++/*
++ * Bind before power-up, including before prepare. Receive runs under the event
++ * mutex: no sleep, returns positive errno. Clear with (NULL, NULL) only before
++ * publication or after verified reset; the owner must outlive its binding.
++ */
++int linuxkpi_mhi_set_receive(struct mhi_controller *,
++    int (*)(void *, const void *, size_t), void *);
++int linuxkpi_mhi_start_transport(struct mhi_controller *);
++/* Stops channels and enters M3; DMA remains owned until confirmed reset. */
++int linuxkpi_mhi_shutdown(struct mhi_controller *);
++int linuxkpi_mhi_submit(struct mhi_controller *, unsigned int,
++    const void *, size_t);
+ 
+ /* -------------------------------------------------------------------------- */
+ 
+@@ -157,34 +189,31 @@ mhi_device_put(struct mhi_device *mhi_dev)
+ static __inline int
+ mhi_prepare_for_power_up(struct mhi_controller *mhi_ctrl)
+ {
+-	/* XXX TODO */
+-	return (0);
++	return (linuxkpi_mhi_prepare(mhi_ctrl));
+ }
+ 
+ static __inline int
+ mhi_sync_power_up(struct mhi_controller *mhi_ctrl)
+ {
+-	/* XXX TODO */
+-	return (0);
++	return (linuxkpi_mhi_power_up(mhi_ctrl));
+ }
+ 
+ static __inline int
+ mhi_async_power_up(struct mhi_controller *mhi_ctrl)
+ {
+-	/* XXX TODO */
+-	return (0);
++	return (-EOPNOTSUPP);
+ }
+ 
+ static __inline void
+ mhi_power_down(struct mhi_controller *mhi_ctrl, bool x)
+ {
+-	/* XXX TODO */
++	linuxkpi_mhi_power_down(mhi_ctrl);
+ }
+ 
+ static __inline void
+ mhi_unprepare_after_power_down(struct mhi_controller *mhi_ctrl)
+ {
+-	/* XXX TODO */
++	linuxkpi_mhi_unprepare(mhi_ctrl);
+ }
+ 
+ /* -------------------------------------------------------------------------- */
+@@ -192,22 +221,19 @@ mhi_unprepare_after_power_down(struct mhi_controller *mhi_ctrl)
+ static __inline int
+ mhi_pm_suspend(struct mhi_controller *mhi_ctrl)
+ {
+-	/* XXX TODO */
+-	return (0);
++	return (-EOPNOTSUPP);
+ }
+ 
+ static __inline int
+ mhi_pm_resume(struct mhi_controller *mhi_ctrl)
+ {
+-	/* XXX TODO */
+-	return (0);
++	return (-EOPNOTSUPP);
+ }
+ 
+ static __inline int
+ mhi_pm_resume_force(struct mhi_controller *mhi_ctrl)
+ {
+-	/* XXX TODO */
+-	return (0);
++	return (-EOPNOTSUPP);
+ }
+ 
+ /* -------------------------------------------------------------------------- */
+@@ -215,8 +241,7 @@ mhi_pm_resume_force(struct mhi_controller *mhi_ctrl)
+ static __inline int
+ mhi_force_rddm_mode(struct mhi_controller *mhi_ctrl)
+ {
+-	/* XXX TODO */
+-	return (0);
++	return (-EOPNOTSUPP);
+ }
+ 
+ #endif	/* _LINUXKPI_LINUX_MHI_H */
+diff --git a/sys/compat/linuxkpi/common/include/linux/soc/qcom/qmi.h b/sys/compat/linuxkpi/common/include/linux/soc/qcom/qmi.h
+index 647eaf271d8..ae40131017e 100644
+--- a/sys/compat/linuxkpi/common/include/linux/soc/qcom/qmi.h
++++ b/sys/compat/linuxkpi/common/include/linux/soc/qcom/qmi.h
+@@ -30,6 +30,7 @@
+ 
+ /* QMI (Qualcomm MSM Interface) */
+ 
++#include <linux/kernel.h>
+ #include <linux/qrtr.h>
+ 
+ enum soc_qcom_qmi_data_type {
+@@ -45,8 +46,8 @@ enum soc_qcom_qmi_data_type {
+ 	QMI_STRING,
+ };
+ 
+-#define	QMI_RESULT_SUCCESS_V01	__LINE__
+-#define	QMI_INDICATION		__LINE__
++#define	QMI_RESULT_SUCCESS_V01	0
++#define	QMI_INDICATION		4
+ 
+ struct qmi_handle;
+ 
+@@ -75,6 +76,13 @@ struct qmi_response_type_v01 {
+ };
+ 
+ struct qmi_txn {
++	struct qmi_handle		*handle;
++	const struct qmi_elem_info	*ei;
++	void				*dest;
++	size_t				dest_size;
++	uint16_t			id, message;
++	int				result;
++	bool				sent, done, active;
+ };
+ 
+ struct qmi_service {
+@@ -100,8 +108,21 @@ struct qmi_handle {
+ 
+ 	const struct qmi_msg_handler	*handler;
+ 	struct qmi_ops			ops;
++	const struct qmi_native_ops	*native_ops;
++	void				*native;
+ };
+ 
++/* A direct, device-owned MHI transport; not a QRTR socket implementation. */
++struct qmi_native_ops {
++	int (*lookup)(struct qmi_handle *, uint32_t, uint32_t, uint32_t);
++	void (*release)(struct qmi_handle *);
++	int (*send)(struct qmi_handle *, struct qmi_txn *, uint32_t, size_t,
++	    const struct qmi_elem_info *, const void *);
++	int (*init)(struct qmi_handle *, struct qmi_txn *,
++	    const struct qmi_elem_info *, void *);
++	void (*cancel)(struct qmi_txn *);
++	int (*wait)(struct qmi_txn *, uint64_t);
++};
+ 
+ /* XXX-TODO need implementation somewhere... it is not in ath1xk* */
+ extern struct qmi_elem_info qmi_response_type_v01_ei[];
+@@ -111,14 +132,8 @@ qmi_handle_init(struct qmi_handle *handle, size_t resp_len_max,
+     const struct qmi_ops *ops, const struct qmi_msg_handler *handler)
+ {
+ 
+-	handle->handler = handler;
+-	if (ops != NULL)
+-		handle->ops = *ops;
+-
+-        /* We will find out what else to do here. */
+-	/* XXX TODO */
+-
+-	return (0);
++	pr_err("%s: QMI transport is not implemented\n", __func__);
++	return (-EOPNOTSUPP);
+ }
+ 
+ static __inline int
+@@ -126,15 +141,18 @@ qmi_add_lookup(struct qmi_handle *handle, uint32_t service, uint32_t version,
+     uint32_t service_ins_id)
+ {
+ 
+-	/* XXX TODO */
+-	return (0);
++	if (handle->native_ops == NULL)
++		return (-EOPNOTSUPP);
++	return (handle->native_ops->lookup(handle, service, version,
++	    service_ins_id));
+ }
+ 
+ static __inline void
+ qmi_handle_release(struct qmi_handle *handle)
+ {
+ 
+-	/* XXX TODO */
++	if (handle->native_ops != NULL)
++		handle->native_ops->release(handle);
+ }
+ 
+ static __inline int
+@@ -142,15 +160,17 @@ qmi_send_request(struct qmi_handle *handle, void *x, struct qmi_txn *txn,
+     uint32_t msd_id, size_t len, const struct qmi_elem_info *ei, void *req)
+ {
+ 
+-	/* XXX TODO */
+-	return (-ENXIO);
++	if (handle->native_ops == NULL || x != NULL)
++		return (-EOPNOTSUPP);
++	return (handle->native_ops->send(handle, txn, msd_id, len, ei, req));
+ }
+ 
+ static __inline void
+ qmi_txn_cancel(struct qmi_txn *txn)
+ {
+ 
+-	/* XXX TODO */
++	if (txn->handle != NULL && txn->handle->native_ops != NULL)
++		txn->handle->native_ops->cancel(txn);
+ }
+ 
+ static __inline int
+@@ -158,16 +178,18 @@ qmi_txn_init(struct qmi_handle *handle, struct qmi_txn *txn,
+     const struct qmi_elem_info *ei, void *resp)
+ {
+ 
+-	/* XXX TODO */
+-	return (-ENXIO);
++	if (handle->native_ops == NULL)
++		return (-EOPNOTSUPP);
++	return (handle->native_ops->init(handle, txn, ei, resp));
+ }
+ 
+ static __inline int
+ qmi_txn_wait(struct qmi_txn *txn, uint64_t jiffies)
+ {
+ 
+-	/* XXX TODO */
+-	return (-ENXIO);
++	if (txn->handle == NULL || txn->handle->native_ops == NULL)
++		return (-EOPNOTSUPP);
++	return (txn->handle->native_ops->wait(txn, jiffies));
+ }
+ 
+ #endif	/* _LINUXKPI_LINUX_SOC_QCOM_QMI_H */
+diff --git a/sys/compat/linuxkpi/common/src/linux_mhi.c b/sys/compat/linuxkpi/common/src/linux_mhi.c
+index 5d3c391f91a..5a75c83457b 100644
+--- a/sys/compat/linuxkpi/common/src/linux_mhi.c
++++ b/sys/compat/linuxkpi/common/src/linux_mhi.c
+@@ -29,12 +29,1355 @@
+ #include <sys/types.h>
+ #include <sys/kernel.h>
+ #include <sys/malloc.h>
++#include <sys/endian.h>
++#include <sys/fail.h>
++#include <sys/time.h>
+ 
+ #include <linux/kernel.h>	/* pr_debug */
++#include <linux/device.h>
++#include <linux/dma-mapping.h>
++#include <linux/firmware.h>
++#include <linux/interrupt.h>
+ #include <linux/mhi.h>
+ 
++#include "linux_mhi.h"
++
+ static MALLOC_DEFINE(M_LKPIMHI, "lkpimhi", "LinuxKPI MHI compat");
+ 
++static void
++mhi_dma_free(struct lkpi_mhi_dma *buffer)
++{
++	int error;
++
++	if (buffer->loaded) {
++		if (buffer->synced)
++			bus_dmamap_sync(buffer->tag, buffer->map,
++			    BUS_DMASYNC_POSTREAD | BUS_DMASYNC_POSTWRITE);
++		bus_dmamap_unload(buffer->tag, buffer->map);
++	}
++	if (buffer->vaddr != NULL)
++		bus_dmamem_free(buffer->tag, buffer->vaddr, buffer->map);
++	if (buffer->tag != NULL) {
++		error = bus_dma_tag_destroy(buffer->tag);
++		KASSERT(error == 0, ("MHI DMA tag still busy: %d", error));
++		if (error != 0)
++			pr_err("%s: DMA tag destruction failed: %d\n",
++			    __func__, error);
++	}
++	memset(buffer, 0, sizeof(*buffer));
++}
++
++struct mhi_dma_load {
++	struct lkpi_mhi_dma *buffer;
++	int error;
++};
++
++static void
++mhi_dma_callback(void *arg, bus_dma_segment_t *segments, int count, int error)
++{
++	struct mhi_dma_load *result = arg;
++
++	result->error = error;
++	if (error != 0)
++		return;
++	result->buffer->loaded = true;
++	if (count != 1 || segments[0].ds_len < result->buffer->size) {
++		result->error = EFBIG;
++		return;
++	}
++	result->buffer->address = segments[0].ds_addr;
++}
++
++static int
++mhi_dma_alloc(struct mhi_controller *ctrl, struct lkpi_mhi_dma *buffer,
++    size_t size, size_t alignment)
++{
++	struct mhi_dma_load result = { .buffer = buffer };
++	bus_addr_t limit;
++	int error;
++
++	KFAIL_POINT_CODE(DEBUG_FP, lkpi_mhi_dma_alloc, return (ENOMEM));
++	/* ath12k uses 32-bit coherent DMA even with a wider streaming mask. */
++	limit = MIN(ctrl->iova_stop, BUS_SPACE_MAXADDR_32BIT);
++	buffer->size = size;
++	error = bus_dma_tag_create(bus_get_dma_tag(ctrl->cntrl_dev->bsddev),
++	    alignment, 0, limit, BUS_SPACE_MAXADDR, NULL, NULL,
++	    size, 1, size, 0, NULL, NULL, &buffer->tag);
++	if (error != 0)
++		return (error);
++	error = bus_dmamem_alloc(buffer->tag, &buffer->vaddr,
++	    BUS_DMA_NOWAIT | BUS_DMA_ZERO | BUS_DMA_COHERENT, &buffer->map);
++	if (error != 0)
++		return (error);
++	error = bus_dmamap_load(buffer->tag, buffer->map, buffer->vaddr, size,
++	    mhi_dma_callback, &result, BUS_DMA_NOWAIT);
++	if (error != 0)
++		return (error);
++	if (result.error != 0)
++		return (result.error);
++	if (!buffer->loaded)
++		return (EIO);
++	if ((buffer->address & (alignment - 1)) != 0 ||
++	    ((uintptr_t)buffer->vaddr & (MIN(alignment, PAGE_SIZE) - 1)) != 0 ||
++	    buffer->address < ctrl->iova_start || buffer->address > limit ||
++	    size - 1 > limit - buffer->address)
++		return (ERANGE);
++	return (0);
++}
++
++static void
++mhi_dma_sync(struct lkpi_mhi_dma *buffer)
++{
++	if (!buffer->loaded)
++		return;
++	bus_dmamap_sync(buffer->tag, buffer->map,
++	    BUS_DMASYNC_PREREAD | BUS_DMASYNC_PREWRITE);
++	buffer->synced = true;
++}
++
++int
++linuxkpi_mhi_alloc_memory(struct mhi_controller *ctrl,
++    struct lkpi_mhi_dma *buffer, size_t size)
++{
++	int error;
++
++	if (ctrl == NULL || ctrl->cntrl_dev == NULL ||
++	    ctrl->cntrl_dev->bsddev == NULL || ctrl->lkpi_context == NULL ||
++	    ctrl->iova_start > ctrl->iova_stop || buffer == NULL ||
++	    buffer->tag != NULL || size == 0) {
++		pr_err("%s: invalid firmware memory allocation\n", __func__);
++		return (-EINVAL);
++	}
++	error = mhi_dma_alloc(ctrl, buffer, size, 65536);
++	if (error != 0) {
++		mhi_dma_free(buffer);
++		pr_err("%s: firmware DMA allocation failed: %d (bytes=%zu)\n",
++		    __func__, error, size);
++		return (-error);
++	}
++	mhi_dma_sync(buffer);
++	return (0);
++}
++
++int
++linuxkpi_mhi_free_memory(struct mhi_controller *ctrl,
++    struct lkpi_mhi_dma *buffer)
++{
++	if (ctrl == NULL || buffer == NULL || ctrl->lkpi_context == NULL ||
++	    ctrl->lkpi_context->published) {
++		pr_err("%s: quiescent context required before firmware "
++		    "DMA free\n", __func__);
++		return (-EBUSY);
++	}
++	mhi_dma_free(buffer);
++	return (0);
++}
++
++static void
++mhi_dma_cpu(struct lkpi_mhi_dma *buffer)
++{
++	if (!buffer->synced)
++		return;
++	bus_dmamap_sync(buffer->tag, buffer->map,
++	    BUS_DMASYNC_POSTREAD | BUS_DMASYNC_POSTWRITE);
++	buffer->synced = false;
++}
++
++static void
++mhi_context_free(struct lkpi_mhi_context *context)
++{
++	unsigned int i, j;
++
++	if (context->transfers != NULL)
++		for (i = 0; i < context->max_channels; i++) {
++			if (context->transfers[i].slots == NULL)
++				continue;
++			for (j = 0; j < context->transfers[i].count; j++)
++				mhi_dma_free(
++				    &context->transfers[i].slots[j].dma);
++			free(context->transfers[i].slots, M_LKPIMHI);
++		}
++	if (context->channel_rings != NULL)
++		for (i = 0; i < context->max_channels; i++)
++			mhi_dma_free(&context->channel_rings[i]);
++	if (context->event_rings != NULL)
++		for (i = 0; i < context->num_events; i++)
++			mhi_dma_free(&context->event_rings[i].dma);
++	mhi_dma_free(&context->command_ring);
++	mhi_dma_free(&context->commands);
++	mhi_dma_free(&context->events);
++	mhi_dma_free(&context->channels);
++	free(context->channel_rings, M_LKPIMHI);
++	free(context->event_rings, M_LKPIMHI);
++	free(context->transfers, M_LKPIMHI);
++	mtx_destroy(&context->lock);
++	free(context, M_LKPIMHI);
++}
++
++void
++linuxkpi_mhi_free_context(struct mhi_controller *ctrl)
++{
++	if (ctrl == NULL || ctrl->lkpi_context == NULL)
++		return;
++	if (ctrl->lkpi_runtime != NULL && ctrl->lkpi_runtime->irqs != 0) {
++		pr_err("%s: drain controller IRQs before releasing contexts\n",
++		    __func__);
++		return;
++	}
++	if (linuxkpi_mhi_dma_owned(ctrl)) {
++		pr_err("%s: device reset required before releasing MHI "
++		    "contexts\n", __func__);
++		return;
++	}
++	mhi_context_free(ctrl->lkpi_context);
++	ctrl->lkpi_context = NULL;
++}
++
++static bool
++mhi_ring_valid(int elements)
++{
++	return (elements >= 2 && powerof2(elements) &&
++	    elements <= INT_MAX / sizeof(struct lkpi_mhi_tre));
++}
++
++static int
++mhi_config_valid(const struct mhi_controller_config *cfg)
++{
++	const struct mhi_channel_config *channel;
++	const struct mhi_event_config *event;
++	int i, j;
++
++	if (cfg == NULL || cfg->max_channels <= 0 || cfg->max_channels > 256 ||
++	    cfg->num_channels <= 0 || cfg->num_channels > cfg->max_channels ||
++	    cfg->num_events <= 0 || cfg->num_events > 255 ||
++	    cfg->ch_cfg == NULL || cfg->event_cfg == NULL)
++		return (EINVAL);
++	if (cfg->use_bounce_buf)
++		return (EOPNOTSUPP);
++	for (i = 0; i < cfg->num_channels; i++) {
++		channel = &cfg->ch_cfg[i];
++		if (channel->num < 0 || channel->num >= cfg->max_channels ||
++		    channel->event_ring < 0 ||
++		    channel->event_ring >= cfg->num_events ||
++		    !mhi_ring_valid(channel->num_elements) ||
++		    (channel->dir != DMA_TO_DEVICE &&
++		    channel->dir != DMA_FROM_DEVICE) ||
++		    channel->pollcfg < 0 || channel->pollcfg > 63)
++			return (EINVAL);
++		if (channel->offload_channel || channel->auto_queue ||
++		    channel->doorbell != MHI_DB_BRST_DISABLE)
++			return (EOPNOTSUPP);
++		for (j = 0; j < i; j++)
++			if (cfg->ch_cfg[j].num == channel->num)
++				return (EINVAL);
++	}
++	for (i = 0; i < cfg->num_events; i++) {
++		event = &cfg->event_cfg[i];
++		if (!mhi_ring_valid(event->num_elements) || event->irq < 0 ||
++		    event->irq_moderation_ms < 0 ||
++		    event->irq_moderation_ms > UINT16_MAX ||
++		    (event->data_type != MHI_ER_CTRL &&
++		    event->data_type != MHI_ER_DATA))
++			return (EINVAL);
++		if (event->offload_channel || event->client_managed ||
++		    event->hardware_event || event->mode != MHI_DB_BRST_DISABLE)
++			return (EOPNOTSUPP);
++	}
++	return (0);
++}
++
++int
++linuxkpi_mhi_alloc_context(struct mhi_controller *ctrl,
++    const struct mhi_controller_config *cfg)
++{
++	struct lkpi_mhi_channel_context *channels, *channel;
++	struct lkpi_mhi_event_context *events;
++	struct lkpi_mhi_command_context *command;
++	struct lkpi_mhi_context *context;
++	struct lkpi_mhi_dma *ring;
++	const struct mhi_channel_config *ch;
++	const struct mhi_event_config *ev;
++	size_t size;
++	int error, i;
++
++	if (ctrl == NULL || ctrl->cntrl_dev == NULL ||
++	    ctrl->cntrl_dev->bsddev == NULL ||
++	    ctrl->iova_start > ctrl->iova_stop) {
++		pr_err("%s: invalid controller or DMA interval\n", __func__);
++		return (-EINVAL);
++	}
++	if (ctrl->lkpi_context != NULL) {
++		pr_err("%s: contexts already allocated\n", __func__);
++		return (-EBUSY);
++	}
++	error = mhi_config_valid(cfg);
++	if (error != 0) {
++		pr_err("%s: invalid or unsupported configuration: %d\n",
++		    __func__, error);
++		return (-error);
++	}
++	context = malloc(sizeof(*context), M_LKPIMHI, M_NOWAIT | M_ZERO);
++	if (context == NULL) {
++		pr_err("%s: context allocation failed\n", __func__);
++		return (-ENOMEM);
++	}
++	context->max_channels = cfg->max_channels;
++	mtx_init(&context->lock, "MHI events", NULL, MTX_DEF);
++	context->num_events = cfg->num_events;
++	context->channel_rings = mallocarray(cfg->max_channels,
++	    sizeof(*context->channel_rings), M_LKPIMHI, M_NOWAIT | M_ZERO);
++	context->event_rings = mallocarray(cfg->num_events,
++	    sizeof(*context->event_rings), M_LKPIMHI, M_NOWAIT | M_ZERO);
++	context->transfers = mallocarray(cfg->max_channels,
++	    sizeof(*context->transfers), M_LKPIMHI, M_NOWAIT | M_ZERO);
++	if (context->channel_rings == NULL || context->event_rings == NULL ||
++	    context->transfers == NULL) {
++		error = ENOMEM;
++		goto fail;
++	}
++	error = mhi_dma_alloc(ctrl, &context->channels,
++	    cfg->max_channels * sizeof(*channels), 64);
++	if (error != 0)
++		goto fail;
++	error = mhi_dma_alloc(ctrl, &context->events,
++	    cfg->num_events * sizeof(*events), 64);
++	if (error != 0)
++		goto fail;
++	error = mhi_dma_alloc(ctrl, &context->commands, sizeof(*command), 64);
++	if (error != 0)
++		goto fail;
++	size = 128 * sizeof(struct lkpi_mhi_tre);
++	error = mhi_dma_alloc(ctrl, &context->command_ring, size, size);
++	if (error != 0)
++		goto fail;
++	command = context->commands.vaddr;
++	ring = &context->command_ring;
++	command->rbase = command->rp = command->wp = htole64(ring->address);
++	command->rlen = htole64(ring->size);
++
++	events = context->events.vaddr;
++	for (i = 0; i < cfg->num_events; i++) {
++		ev = &cfg->event_cfg[i];
++		ring = &context->event_rings[i].dma;
++		size = ev->num_elements * sizeof(struct lkpi_mhi_tre);
++		error = mhi_dma_alloc(ctrl, ring, size, size);
++		if (error != 0)
++			goto fail;
++		events[i].intmod = htole32(
++		    (uint32_t)ev->irq_moderation_ms << 16);
++		events[i].ertype = htole32(1);
++		events[i].msivec = htole32(ev->irq);
++		events[i].rbase = events[i].rp = htole64(ring->address);
++		events[i].wp = htole64(ring->address + ring->size -
++		    sizeof(struct lkpi_mhi_tre));
++		events[i].rlen = htole64(ring->size);
++		context->event_rings[i].write_offset = ring->size -
++		    sizeof(struct lkpi_mhi_tre);
++		context->event_rings[i].irq = ev->irq;
++		context->event_rings[i].type = ev->data_type;
++	}
++	channels = context->channels.vaddr;
++	for (i = 0; i < cfg->max_channels; i++)
++		channels[i].chcfg = htole32(MHI_DB_BRST_DISABLE << 8);
++	for (i = 0; i < cfg->num_channels; i++) {
++		ch = &cfg->ch_cfg[i];
++		channel = &channels[ch->num];
++		ring = &context->channel_rings[ch->num];
++		size = ch->num_elements * sizeof(struct lkpi_mhi_tre);
++		error = mhi_dma_alloc(ctrl, ring, size, size);
++		if (error != 0)
++			goto fail;
++		channel->chcfg = htole32((ch->doorbell << 8) |
++		    (ch->pollcfg << 10));
++		channel->chtype = htole32(ch->dir);
++		channel->erindex = htole32(ch->event_ring);
++		channel->rbase = channel->rp = channel->wp =
++		    htole64(ring->address);
++		channel->rlen = htole64(ring->size);
++		context->transfers[ch->num].direction = ch->dir;
++		context->transfers[ch->num].event_ring = ch->event_ring;
++		context->transfers[ch->num].count = ch->num_elements;
++	}
++	mhi_dma_sync(&context->channels);
++	mhi_dma_sync(&context->events);
++	mhi_dma_sync(&context->commands);
++	mhi_dma_sync(&context->command_ring);
++	for (i = 0; i < cfg->num_events; i++)
++		mhi_dma_sync(&context->event_rings[i].dma);
++	for (i = 0; i < cfg->max_channels; i++)
++		mhi_dma_sync(&context->channel_rings[i]);
++	/* No MMIO writes: the device cannot own these buffers yet. */
++	ctrl->lkpi_context = context;
++	return (0);
++fail:
++	pr_err("%s: DMA context allocation failed: %d\n", __func__, error);
++	mhi_context_free(context);
++	return (-error);
++}
++
++static int
++mhi_boot_read(struct mhi_controller *ctrl, uint32_t offset, uint32_t *value)
++{
++	int error;
++
++	if ((offset & 3) != 0 || ctrl->reg_len < sizeof(*value) ||
++	    offset > ctrl->reg_len - sizeof(*value))
++		return (EINVAL);
++	error = ctrl->read_reg(ctrl, (uint8_t *)ctrl->regs + offset, value);
++	if (error != 0 || *value == UINT32_MAX)
++		return (EIO);
++	return (0);
++}
++
++static void
++mhi_boot_write(struct mhi_controller *ctrl, uint32_t offset, uint32_t value)
++{
++	ctrl->write_reg(ctrl, (uint8_t *)ctrl->regs + offset, value);
++}
++
++static void
++mhi_boot_write64(struct mhi_controller *ctrl, uint32_t offset, uint64_t value)
++{
++	mhi_boot_write(ctrl, offset + 4, value >> 32);
++	mhi_boot_write(ctrl, offset, (uint32_t)value);
++}
++
++int
++linuxkpi_mhi_alloc_transfer(struct mhi_controller *ctrl, unsigned int channel)
++{
++	struct lkpi_mhi_context *context;
++	struct lkpi_mhi_xfer *xfer;
++	struct lkpi_mhi_tre *tre;
++	unsigned int i;
++	int error;
++
++	if (ctrl == NULL || (context = ctrl->lkpi_context) == NULL ||
++	    context->published || channel >= context->max_channels ||
++	    context->transfers[channel].count == 0 ||
++	    context->transfers[channel].slots != NULL) {
++		pr_err("%s: invalid/unavailable transfer channel\n", __func__);
++		return (-EINVAL);
++	}
++	xfer = &context->transfers[channel];
++	xfer->slots = mallocarray(xfer->count, sizeof(*xfer->slots),
++	    M_LKPIMHI, M_NOWAIT | M_ZERO);
++	if (xfer->slots == NULL) {
++		pr_err("%s: slot allocation failed\n", __func__);
++		return (-ENOMEM);
++	}
++	for (i = 0; i < xfer->count; i++) {
++		error = mhi_dma_alloc(ctrl, &xfer->slots[i].dma, UINT16_MAX,
++		    64);
++		if (error != 0)
++			goto fail;
++	}
++	if (xfer->direction == DMA_FROM_DEVICE) {
++		mhi_dma_cpu(&context->channel_rings[channel]);
++		tre = context->channel_rings[channel].vaddr;
++		for (i = 0; i < xfer->count; i++) {
++			tre[i].ptr = htole64(xfer->slots[i].dma.address);
++			tre[i].dword[0] = htole32(UINT16_MAX);
++			tre[i].dword[1] = htole32(0x20200);
++			mhi_dma_sync(&xfer->slots[i].dma);
++		}
++		mhi_dma_sync(&context->channel_rings[channel]);
++	}
++	return (0);
++fail:
++	for (i = 0; i < xfer->count; i++)
++		mhi_dma_free(&xfer->slots[i].dma);
++	free(xfer->slots, M_LKPIMHI);
++	xfer->slots = NULL;
++	pr_err("%s: transfer DMA allocation failed: %d\n", __func__, error);
++	return (-error);
++}
++
++static int
++mhi_channel_command(struct mhi_controller *ctrl, unsigned int channel,
++    bool start)
++{
++	struct lkpi_mhi_context *context;
++	struct lkpi_mhi_channel_context *channels;
++	struct lkpi_mhi_command_context *command;
++	struct lkpi_mhi_tre *tre;
++	struct lkpi_mhi_xfer *xfer;
++	uint32_t state, ee;
++	int error = 0;
++
++	if (ctrl == NULL || (context = ctrl->lkpi_context) == NULL ||
++	    channel >= context->max_channels) {
++		pr_err("%s: invalid channel\n", __func__);
++		return (-EINVAL);
++	}
++	mtx_lock(&context->lock);
++	xfer = &context->transfers[channel];
++	if (!context->published || context->quiescing || context->state != 2 ||
++	    context->ee != 2 || xfer->slots == NULL ||
++	    context->event_error != 0 || context->command_pending ||
++	    (start && context->stopping) ||
++	    xfer->starting || xfer->started == start) {
++		error = context->event_error != 0 ?
++		    context->event_error : EBUSY;
++		goto out;
++	}
++	if (start) {
++		mhi_dma_cpu(&context->channels);
++		channels = context->channels.vaddr;
++		channels[channel].chcfg = htole32(
++		    (le32toh(channels[channel].chcfg) & ~0xffU) | 1);
++		mhi_dma_sync(&context->channels);
++	}
++	mhi_dma_cpu(&context->command_ring);
++	tre = (struct lkpi_mhi_tre *)((uint8_t *)context->command_ring.vaddr +
++	    context->command_write);
++	tre->ptr = 0;
++	tre->dword[0] = 0;
++	context->command_type = start ? 18 : 17;
++	tre->dword[1] = htole32((channel << 24) |
++	    (context->command_type << 16));
++	mhi_dma_sync(&context->command_ring);
++	context->command_write = (context->command_write + sizeof(*tre)) %
++	    context->command_ring.size;
++	mhi_dma_cpu(&context->commands);
++	command = context->commands.vaddr;
++	command->wp = htole64(context->command_ring.address +
++	    context->command_write);
++	mhi_dma_sync(&context->commands);
++	context->command_pending = true;
++	context->command_channel = channel;
++	xfer->starting = true;
++	mhi_boot_write64(ctrl, 0x70,
++	    context->command_ring.address + context->command_write);
++out:
++	state = context->state;
++	ee = context->ee;
++	mtx_unlock(&context->lock);
++	if (error != 0)
++		pr_err("%s: channel %u submission failed: %d "
++		    "(state=%u EE=%u)\n",
++		    __func__, channel, error, state, ee);
++	return (-error);
++}
++
++int
++linuxkpi_mhi_start_channel(struct mhi_controller *ctrl, unsigned int channel)
++{
++	return (mhi_channel_command(ctrl, channel, true));
++}
++
++int
++linuxkpi_mhi_stop_channel(struct mhi_controller *ctrl, unsigned int channel)
++{
++	return (mhi_channel_command(ctrl, channel, false));
++}
++
++int
++linuxkpi_mhi_submit(struct mhi_controller *ctrl, unsigned int channel,
++    const void *data, size_t length)
++{
++	struct lkpi_mhi_context *context;
++	struct lkpi_mhi_channel_context *channels;
++	struct lkpi_mhi_xfer *xfer;
++	struct lkpi_mhi_slot *slot;
++	struct lkpi_mhi_tre *tre;
++	int error = 0;
++
++	if (ctrl == NULL || (context = ctrl->lkpi_context) == NULL ||
++	    channel >= context->max_channels || data == NULL ||
++	    length == 0 || length > UINT16_MAX) {
++		pr_err("%s: invalid transfer\n", __func__);
++		return (-EINVAL);
++	}
++	mtx_lock(&context->lock);
++	xfer = &context->transfers[channel];
++	if (!context->published || context->stopping || context->quiescing ||
++	    context->state != 2 ||
++	    !xfer->started ||
++	    xfer->direction != DMA_TO_DEVICE || context->event_error != 0 ||
++	    xfer->queued >= xfer->count - 1) {
++		error = context->event_error != 0 ?
++		    context->event_error : EBUSY;
++		goto out;
++	}
++	slot = &xfer->slots[xfer->write_offset / sizeof(*tre)];
++	mhi_dma_cpu(&slot->dma);
++	memcpy(slot->dma.vaddr, data, length);
++	slot->length = length;
++	mhi_dma_sync(&slot->dma);
++	mhi_dma_cpu(&context->channel_rings[channel]);
++	tre = (struct lkpi_mhi_tre *)((uint8_t *)
++	    context->channel_rings[channel].vaddr + xfer->write_offset);
++	tre->ptr = htole64(slot->dma.address);
++	tre->dword[0] = htole32(length);
++	tre->dword[1] = htole32(0x20200);
++	mhi_dma_sync(&context->channel_rings[channel]);
++	xfer->write_offset = (xfer->write_offset + sizeof(*tre)) %
++	    context->channel_rings[channel].size;
++	xfer->queued++;
++	mhi_dma_cpu(&context->channels);
++	channels = context->channels.vaddr;
++	channels[channel].wp = htole64(context->channel_rings[channel].address +
++	    xfer->write_offset);
++	mhi_dma_sync(&context->channels);
++	mhi_boot_write64(ctrl, context->channel_db + channel * 8,
++	    context->channel_rings[channel].address + xfer->write_offset);
++out:
++	mtx_unlock(&context->lock);
++	if (error != 0)
++		pr_err("%s: channel %u transfer failed: %d\n",
++		    __func__, channel, error);
++	return (-error);
++}
++
++static int
++mhi_complete_command(struct mhi_controller *ctrl, uint64_t pointer,
++    uint32_t code)
++{
++	struct lkpi_mhi_context *context = ctrl->lkpi_context;
++	struct lkpi_mhi_channel_context *channels;
++	struct lkpi_mhi_xfer *xfer;
++	struct lkpi_mhi_tre *tre;
++	unsigned int channel = context->command_channel;
++	int error = 0;
++
++	if (!context->command_pending || code != 1 ||
++	    pointer != context->command_ring.address + context->command_read)
++		return (EIO);
++	mhi_dma_cpu(&context->command_ring);
++	tre = (struct lkpi_mhi_tre *)((uint8_t *)context->command_ring.vaddr +
++	    context->command_read);
++	if ((context->command_type != 17 && context->command_type != 18) ||
++	    le32toh(tre->dword[1]) !=
++	    ((channel << 24) | (context->command_type << 16)))
++		error = EIO;
++	mhi_dma_sync(&context->command_ring);
++	if (error != 0)
++		return (error);
++	xfer = &context->transfers[channel];
++	xfer->starting = false;
++	xfer->started = context->command_type == 18;
++	context->command_pending = false;
++	context->command_read = (context->command_read + sizeof(*tre)) %
++	    context->command_ring.size;
++	context->command_events++;
++	if (xfer->started && xfer->direction == DMA_FROM_DEVICE) {
++		xfer->write_offset = (xfer->count - 1) * sizeof(*tre);
++		xfer->queued = xfer->count - 1;
++		mhi_dma_cpu(&context->channels);
++		channels = context->channels.vaddr;
++		channels[channel].wp = htole64(
++		    context->channel_rings[channel].address +
++		    xfer->write_offset);
++		mhi_dma_sync(&context->channels);
++		mhi_boot_write64(ctrl, context->channel_db + channel * 8,
++		    context->channel_rings[channel].address +
++		    xfer->write_offset);
++	}
++	wakeup(context);
++	return (0);
++}
++
++int
++linuxkpi_mhi_shutdown(struct mhi_controller *ctrl)
++{
++	struct lkpi_mhi_context *context;
++	sbintime_t deadline;
++	uint32_t control, status;
++	unsigned int channel;
++	bool started, pending;
++	int error, first_error = 0;
++
++	if (ctrl == NULL || (context = ctrl->lkpi_context) == NULL)
++		return (-ENXIO);
++	mtx_lock(&context->lock);
++	context->stopping = true;
++	mtx_unlock(&context->lock);
++	for (channel = 20; channel <= 21 && channel < context->max_channels;
++	    channel++) {
++		mtx_lock(&context->lock);
++		started = context->transfers[channel].started;
++		mtx_unlock(&context->lock);
++		if (!started)
++			continue;
++		error = -linuxkpi_mhi_stop_channel(ctrl, channel);
++		if (error == 0) {
++			deadline = sbinuptime() + 5 * SBT_1S;
++			do {
++				error = -linuxkpi_mhi_process_events(ctrl);
++				mtx_lock(&context->lock);
++				pending = context->command_pending;
++				mtx_unlock(&context->lock);
++				if (error != 0 || !pending)
++					break;
++				pause_sbt("mhistop", SBT_1MS, 0, C_HARDCLOCK);
++			} while (sbinuptime() < deadline);
++			if (error == 0 && pending)
++				error = ETIMEDOUT;
++		}
++		if (error != 0) {
++			pr_err("%s: channel %u stop failed: %d; reset "
++			    "required\n", __func__, channel, error);
++			if (first_error == 0)
++				first_error = error;
++		}
++	}
++	/* Match qwz: drain events, request M3, then let the caller reset. */
++	error = -linuxkpi_mhi_process_events(ctrl);
++	if (error != 0 && first_error == 0)
++		first_error = error;
++	error = mhi_boot_read(ctrl, LKPI_MHI_STATUS, &status);
++	if (error == 0 && ((status >> 8) & 0xff) == 2) {
++		error = mhi_boot_read(ctrl, LKPI_MHI_CTRL, &control);
++		if (error == 0) {
++			ctrl->write_reg(ctrl,
++			    (uint8_t *)ctrl->regs + LKPI_MHI_CTRL,
++			    (control & ~0xff00U) | (5U << 8));
++			deadline = sbinuptime() + SBT_1S;
++			do {
++				error = mhi_boot_read(ctrl, LKPI_MHI_STATUS,
++				    &status);
++				if (error != 0 || ((status >> 8) & 0xff) == 5)
++					break;
++				pause_sbt("mhim3", 10 * SBT_1MS, 0,
++				    C_HARDCLOCK);
++			} while (sbinuptime() < deadline);
++			if (error == 0 && ((status >> 8) & 0xff) != 5)
++				error = ETIMEDOUT;
++		}
++	}
++	if (error != 0) {
++		pr_err("%s: M3 transition failed: %d; reset required\n",
++		    __func__, error);
++		if (first_error == 0)
++			first_error = error;
++	}
++	linuxkpi_mhi_power_down(ctrl);
++	return (-first_error);
++}
++
++static int
++mhi_complete_transfer(struct mhi_controller *ctrl, unsigned int event_ring,
++    struct lkpi_mhi_tre *event)
++{
++	struct lkpi_mhi_context *context = ctrl->lkpi_context;
++	struct lkpi_mhi_channel_context *channels;
++	struct lkpi_mhi_xfer *xfer;
++	struct lkpi_mhi_dma *ring;
++	struct lkpi_mhi_slot *slot;
++	uint64_t pointer = le64toh(event->ptr);
++	uint32_t word = le32toh(event->dword[0]);
++	unsigned int channel = le32toh(event->dword[1]) >> 24;
++	size_t offset, completed, length, i;
++	int error;
++
++	if (channel >= context->max_channels || (word >> 24) != 2)
++		return (EIO);
++	xfer = &context->transfers[channel];
++	ring = &context->channel_rings[channel];
++	if ((!xfer->started && !context->stopping) ||
++	    xfer->slots == NULL || xfer->event_ring != event_ring ||
++	    pointer < ring->address || pointer - ring->address >= ring->size ||
++	    ((pointer - ring->address) & 15) != 0)
++		return (EIO);
++	offset = pointer - ring->address;
++	completed = ((offset + ring->size - xfer->read_offset) % ring->size) /
++	    sizeof(*event) + 1;
++	if (completed > xfer->queued)
++		return (EIO);
++	if (xfer->direction == DMA_FROM_DEVICE && completed != 1)
++		return (EOPNOTSUPP);
++	length = word & UINT16_MAX;
++	slot = &xfer->slots[offset / sizeof(*event)];
++	if (xfer->direction == DMA_FROM_DEVICE &&
++	    (length == 0 || length > slot->dma.size))
++		return (EIO);
++	for (i = 0; i < completed; i++) {
++		slot = &xfer->slots[xfer->read_offset / sizeof(*event)];
++		mhi_dma_cpu(&slot->dma);
++		if (xfer->direction == DMA_FROM_DEVICE) {
++			memcpy(context->rx_sample, slot->dma.vaddr,
++			    MIN(length, sizeof(context->rx_sample)));
++			context->rx_length = length;
++			context->rx_packets++;
++			error = context->stopping ||
++			    context->receive == NULL ? 0 :
++			    context->receive(context->receive_arg,
++			    slot->dma.vaddr, length);
++			mhi_dma_sync(&slot->dma);
++			if (error != 0)
++				return (error);
++			if (context->stopping)
++				xfer->queued--;
++			else
++				xfer->write_offset =
++				    (xfer->write_offset + sizeof(*event)) %
++				    ring->size;
++		} else {
++			slot->length = 0;
++			xfer->queued--;
++			context->tx_packets++;
++		}
++		xfer->read_offset = (xfer->read_offset + sizeof(*event)) %
++		    ring->size;
++	}
++	if (xfer->direction == DMA_FROM_DEVICE && !context->stopping) {
++		mhi_dma_cpu(&context->channels);
++		channels = context->channels.vaddr;
++		channels[channel].wp = htole64(ring->address +
++		    xfer->write_offset);
++		mhi_dma_sync(&context->channels);
++		mhi_boot_write64(ctrl, context->channel_db + channel * 8,
++		    ring->address + xfer->write_offset);
++	}
++	wakeup(context);
++	return (0);
++}
++
++static int
++mhi_process_events_locked(struct mhi_controller *ctrl)
++{
++	struct lkpi_mhi_context *context;
++	struct lkpi_mhi_event_context *events;
++	struct lkpi_mhi_event_ring *event;
++	struct lkpi_mhi_dma *ring;
++	struct lkpi_mhi_tre *tre;
++	uint64_t rp;
++	uint32_t type, code;
++	size_t end;
++	unsigned int i;
++	int error = 0;
++
++	context = ctrl->lkpi_context;
++	mtx_assert(&context->lock, MA_OWNED);
++	mhi_dma_cpu(&context->events);
++	events = context->events.vaddr;
++	for (i = 0; i < context->num_events; i++) {
++		event = &context->event_rings[i];
++		ring = &event->dma;
++		rp = le64toh(events[i].rp);
++		if (rp < ring->address || rp - ring->address >= ring->size ||
++		    ((rp - ring->address) & 15) != 0 ||
++		    le64toh(events[i].wp) !=
++		    ring->address + event->write_offset ||
++		    le64toh(events[i].rbase) != ring->address ||
++		    le64toh(events[i].rlen) != ring->size) {
++			error = EIO;
++			break;
++		}
++		end = rp - ring->address;
++		if (end == event->read_offset)
++			continue;
++		mhi_dma_cpu(ring);
++		while (event->read_offset != end) {
++			tre = (struct lkpi_mhi_tre *)((uint8_t *)ring->vaddr +
++			    event->read_offset);
++			type = (le32toh(tre->dword[1]) >> 16) & 0xff;
++			code = le32toh(tre->dword[0]) >> 24;
++			switch (type) {
++			case 0x21:
++				error = event->type != MHI_ER_CTRL ? EIO :
++				    mhi_complete_command(ctrl,
++				    le64toh(tre->ptr), code);
++				break;
++			case 0x22:
++				error = mhi_complete_transfer(ctrl, i, tre);
++				break;
++			case 0x20:
++				context->state = code;
++				context->state_events++;
++				if (code > 7)
++					error = EIO;
++				break;
++			case 0x40:
++				context->ee = code;
++				context->ee_events++;
++				if (code > 2)
++					error = EIO;
++				break;
++			default:
++				error = EOPNOTSUPP;
++				break;
++			}
++			if (error != 0) {
++				pr_err("%s: unsupported/error event "
++				    "type=%#x code=%#x\n",
++				    __func__, type, code);
++				break;
++			}
++			event->read_offset =
++			    (event->read_offset + sizeof(*tre)) % ring->size;
++			event->write_offset =
++			    (event->write_offset + sizeof(*tre)) % ring->size;
++		}
++		mhi_dma_sync(ring);
++		if (error != 0)
++			break;
++		events[i].wp = htole64(ring->address + event->write_offset);
++		mhi_dma_sync(&context->events);
++		mhi_boot_write64(ctrl, context->event_db + i * 8,
++		    ring->address + event->write_offset);
++		mhi_dma_cpu(&context->events);
++	}
++	mhi_dma_sync(&context->events);
++	if (error != 0)
++		pr_err("%s: event ring processing failed: %d\n", __func__,
++		    error);
++	return (-error);
++}
++
++int
++linuxkpi_mhi_process_events(struct mhi_controller *ctrl)
++{
++	struct lkpi_mhi_context *context;
++	int error;
++
++	if (ctrl == NULL || (context = ctrl->lkpi_context) == NULL) {
++		pr_err("%s: no event contexts\n", __func__);
++		return (-EINVAL);
++	}
++	mtx_lock(&context->lock);
++	if (!context->published || context->quiescing)
++		error = 0;
++	else if (context->event_error != 0)
++		error = -context->event_error;
++	else {
++		error = mhi_process_events_locked(ctrl);
++		if (error != 0) {
++			context->event_error = -error;
++			wakeup(context);
++		}
++	}
++	mtx_unlock(&context->lock);
++	return (error);
++}
++
++static int
++mhi_boot_wait_ee(struct mhi_controller *ctrl, struct lkpi_mhi_boot *boot,
++    uint32_t expected)
++{
++	struct lkpi_mhi_context *context = ctrl->lkpi_context;
++	sbintime_t deadline = sbinuptime() + ctrl->timeout_ms * SBT_1MS;
++	uint32_t status = 0;
++	bool ready;
++	int error;
++
++	do {
++		error = -linuxkpi_mhi_process_events(ctrl);
++		if (error != 0)
++			goto fail;
++		error = mhi_boot_read(ctrl, LKPI_MHI_STATUS, &status);
++		if (error != 0)
++			goto fail;
++		error = mhi_boot_read(ctrl, boot->bhi + LKPI_MHI_BHI_EXECENV,
++		    &boot->ee);
++		if (error != 0)
++			goto fail;
++		if ((status & 4) != 0 || boot->ee > 2) {
++			error = EIO;
++			goto fail;
++		}
++		if (((status >> 8) & 0xff) == 2 && boot->ee == expected) {
++			/*
++			 * Channel startup requires the mission-mode events
++			 * too.
++			 */
++			mtx_lock(&context->lock);
++			ready = expected != 2 ||
++			    (context->state == 2 && context->ee == expected);
++			mtx_unlock(&context->lock);
++			if (ready)
++				return (0);
++		}
++		pause_sbt("mhiee", SBT_1MS, 0, C_HARDCLOCK);
++	} while (sbinuptime() < deadline);
++	error = ETIMEDOUT;
++fail:
++	pr_err("%s: M0/EE%u wait failed: %d (MHISTATUS=%#x EE=%u)\n",
++	    __func__, expected, error, status, boot->ee);
++	return (-error);
++}
++
++static bool
++mhi_ranges_overlap(uint32_t a, uint32_t alen, uint32_t b, uint32_t blen)
++{
++	return (a < b + blen && b < a + alen);
++}
++
++int
++linuxkpi_mhi_boot_ready(struct mhi_controller *ctrl, struct lkpi_mhi_boot *boot)
++{
++	struct lkpi_mhi_context *context;
++	sbintime_t deadline;
++	uint32_t status = 0, control, config, bhie, chlen, erlen, limit;
++	unsigned int i;
++	int error;
++
++	if (ctrl == NULL || boot == NULL ||
++	    (context = ctrl->lkpi_context) == NULL || context->published ||
++	    !boot->pending || (boot->status >> 30) != 2 ||
++	    ctrl->regs == NULL || ctrl->read_reg == NULL ||
++	    ctrl->write_reg == NULL || ctrl->reg_len < 0xac ||
++	    ctrl->nr_irqs <= 0 ||
++	    ctrl->timeout_ms == 0 || ctrl->timeout_ms > 10000 ||
++	    ctrl->iova_start > ctrl->iova_stop) {
++		pr_err("%s: invalid READY transition parameters\n", __func__);
++		return (-EINVAL);
++	}
++	for (i = 0; i < context->num_events; i++)
++		if (context->event_rings[i].irq >= ctrl->nr_irqs) {
++			pr_err("%s: missing event MSI vector\n", __func__);
++			return (-EINVAL);
++		}
++	deadline = sbinuptime() + ctrl->timeout_ms * SBT_1MS;
++	do {
++		error = mhi_boot_read(ctrl, LKPI_MHI_CTRL, &control);
++		if (error != 0)
++			goto fail;
++		error = mhi_boot_read(ctrl, LKPI_MHI_STATUS, &status);
++		if (error != 0)
++			goto fail;
++		if ((status & 4) != 0) {
++			error = EIO;
++			goto fail;
++		}
++		if ((control & 2) == 0 && (status & 1) != 0)
++			break;
++		pause_sbt("mhiready", SBT_1MS, 0, C_HARDCLOCK);
++	} while (sbinuptime() < deadline);
++	if ((control & 2) != 0 || (status & 1) == 0) {
++		error = ETIMEDOUT;
++		goto fail;
++	}
++	error = mhi_boot_read(ctrl, 0x18, &context->channel_db);
++	if (error != 0)
++		goto fail;
++	error = mhi_boot_read(ctrl, 0x20, &context->event_db);
++	if (error != 0)
++		goto fail;
++	error = mhi_boot_read(ctrl, 0x2c, &bhie);
++	if (error != 0)
++		goto fail;
++	limit = MIN(ctrl->reg_len, 0xfe0);
++	chlen = MAX(context->max_channels, 128) * 8;
++	erlen = context->num_events * 8;
++	if (boot->bhi < 0xb0 || (boot->bhi & 3) != 0 ||
++	    boot->bhi > limit - 0x40 ||
++	    context->channel_db < 0xb0 || (context->channel_db & 7) != 0 ||
++	    context->channel_db > limit ||
++	    chlen > limit - context->channel_db ||
++	    context->event_db < 0xb0 || (context->event_db & 7) != 0 ||
++	    context->event_db > limit || erlen > limit - context->event_db ||
++	    bhie < 0xb0 || (bhie & 3) != 0 || bhie > limit - 0x7c ||
++	    mhi_ranges_overlap(context->channel_db, chlen,
++	    context->event_db, erlen) ||
++	    mhi_ranges_overlap(context->channel_db, chlen, boot->bhi, 0x40) ||
++	    mhi_ranges_overlap(context->event_db, erlen, boot->bhi, 0x40) ||
++	    mhi_ranges_overlap(context->channel_db, chlen, bhie, 0x7c) ||
++	    mhi_ranges_overlap(context->event_db, erlen, bhie, 0x7c)) {
++		error = EINVAL;
++		goto fail;
++	}
++	error = mhi_boot_read(ctrl, 0x10, &config);
++	if (error != 0)
++		goto fail;
++	/*
++	 * Any partial register publication now requires a confirmed device
++	 * reset.
++	 */
++	mtx_lock(&context->lock);
++	context->published = true;
++	mhi_boot_write(ctrl, LKPI_MHI_STATUS, status & ~1U);
++	mhi_dma_sync(&context->channels);
++	mhi_dma_sync(&context->events);
++	mhi_dma_sync(&context->commands);
++	mhi_dma_sync(&context->command_ring);
++	for (i = 0; i < context->num_events; i++)
++		mhi_dma_sync(&context->event_rings[i].dma);
++	for (i = 0; i < context->max_channels; i++)
++		mhi_dma_sync(&context->channel_rings[i]);
++	mhi_boot_write64(ctrl, 0x58, context->channels.address);
++	mhi_boot_write64(ctrl, 0x60, context->events.address);
++	mhi_boot_write64(ctrl, 0x68, context->commands.address);
++	mhi_boot_write64(ctrl, 0x80, ctrl->iova_start);
++	mhi_boot_write64(ctrl, 0x88,
++	    MIN(ctrl->iova_stop, BUS_SPACE_MAXADDR_32BIT));
++	mhi_boot_write64(ctrl, 0x98, ctrl->iova_start);
++	mhi_boot_write64(ctrl, 0xa0,
++	    MIN(ctrl->iova_stop, BUS_SPACE_MAXADDR_32BIT));
++	config = (config & 0xffff) | (context->num_events << 16);
++	mhi_boot_write(ctrl, 0x10, config);
++	for (i = 0; i < context->num_events; i++)
++		mhi_boot_write64(ctrl, context->event_db + i * 8,
++		    context->event_rings[i].dma.address +
++		    context->event_rings[i].write_offset);
++	mhi_boot_write(ctrl, LKPI_MHI_CTRL, (control & ~0xff00U) | 0x200);
++	mtx_unlock(&context->lock);
++	error = -mhi_boot_wait_ee(ctrl, boot, 1);
++	if (error != 0)
++		goto fail;
++	mhi_boot_write64(ctrl, context->channel_db + 127 * 8, 1);
++	return (0);
++fail:
++	pr_err("%s: READY transition failed: %d (MHISTATUS=%#x published=%u)\n",
++	    __func__, error, status, context->published);
++	return (-error);
++}
++
++static void
++mhi_boot_free_firmware(struct lkpi_mhi_boot *boot)
++{
++	unsigned int i;
++
++	if (boot->segments != NULL)
++		for (i = 0; i < boot->num_segments; i++)
++			mhi_dma_free(&boot->segments[i]);
++	mhi_dma_free(&boot->vectors);
++	free(boot->segments, M_LKPIMHI);
++	boot->segments = NULL;
++	boot->num_segments = 0;
++}
++
++int
++linuxkpi_mhi_boot_free(struct lkpi_mhi_boot *boot)
++{
++	if (boot == NULL) {
++		pr_err("%s: invalid boot transfer\n", __func__);
++		return (-EINVAL);
++	}
++	if (boot->pending) {
++		pr_err("%s: device reset required before releasing boot DMA\n",
++		    __func__);
++		return (-EBUSY);
++	}
++	mhi_boot_free_firmware(boot);
++	mhi_dma_free(&boot->image);
++	return (0);
++}
++
++int
++linuxkpi_mhi_boot_bhi(struct mhi_controller *ctrl, struct lkpi_mhi_boot *boot,
++    const void *data, size_t length)
++{
++	sbintime_t deadline;
++	uint32_t control, status, sequence;
++	uint8_t *base;
++	int error;
++
++	if (ctrl == NULL || boot == NULL || data == NULL || length == 0 ||
++	    length > LKPI_MHI_BHI_SIZE || ctrl->cntrl_dev == NULL ||
++	    ctrl->cntrl_dev->bsddev == NULL || ctrl->regs == NULL ||
++	    ctrl->read_reg == NULL || ctrl->write_reg == NULL ||
++	    ctrl->reg_len < 0x4c || ctrl->timeout_ms == 0 ||
++	    ctrl->timeout_ms > 10000 || ctrl->iova_start > ctrl->iova_stop) {
++		pr_err("%s: invalid boot transfer parameters\n", __func__);
++		return (-EINVAL);
++	}
++	if (boot->pending || boot->image.vaddr != NULL) {
++		pr_err("%s: previous boot transfer has not been released\n",
++		    __func__);
++		return (-EBUSY);
++	}
++	boot->bhi = boot->status = boot->ee = 0;
++	error = mhi_boot_read(ctrl, LKPI_MHI_BHI_OFFSET, &boot->bhi);
++	if (error != 0)
++		goto fail;
++	/*
++	 * WCN7850 boot registers must stay in the always-accessible MHI
++	 * area.
++	 */
++	if (boot->bhi < 0xb0 || (boot->bhi & 3) != 0 ||
++	    boot->bhi > MIN(ctrl->reg_len, 0xfe0) - 0x40) {
++		error = EINVAL;
++		goto fail;
++	}
++	error = mhi_boot_read(ctrl, LKPI_MHI_CTRL, &control);
++	if (error != 0)
++		goto fail;
++	error = mhi_boot_read(ctrl, LKPI_MHI_STATUS, &status);
++	if (error != 0)
++		goto fail;
++	error = mhi_boot_read(ctrl, boot->bhi + LKPI_MHI_BHI_EXECENV,
++	    &boot->ee);
++	if (error != 0)
++		goto fail;
++	if (boot->ee != 0 || (control & 0xff02) != 0 ||
++	    (status & 0xff05) != 0) {
++		error = EBUSY;
++		goto fail;
++	}
++	error = mhi_dma_alloc(ctrl, &boot->image, length, 64);
++	if (error != 0) {
++		mhi_dma_free(&boot->image);
++		goto fail;
++	}
++	memcpy(boot->image.vaddr, data, length);
++	mhi_dma_sync(&boot->image);
++	base = (uint8_t *)ctrl->regs + boot->bhi;
++	sequence = arc4random_uniform(0x3fffffff) + 1;
++	/*
++	 * From this point even a failed MMIO read requires reset before
++	 * free.
++	 */
++	boot->pending = true;
++	ctrl->write_reg(ctrl, base + 0x20, 0);
++	ctrl->write_reg(ctrl, base + LKPI_MHI_BHI_STATUS, 0);
++	ctrl->write_reg(ctrl, base + 0x0c, boot->image.address >> 32);
++	ctrl->write_reg(ctrl, base + 0x08, (uint32_t)boot->image.address);
++	ctrl->write_reg(ctrl, base + 0x10, length);
++	ctrl->write_reg(ctrl, base + 0x18, sequence);
++	deadline = sbinuptime() + ctrl->timeout_ms * SBT_1MS;
++	do {
++		error = mhi_boot_read(ctrl, boot->bhi + LKPI_MHI_BHI_STATUS,
++		    &boot->status);
++		if (error != 0)
++			goto fail;
++		error = mhi_boot_read(ctrl, boot->bhi + LKPI_MHI_BHI_EXECENV,
++		    &boot->ee);
++		if (error != 0)
++			goto fail;
++		error = mhi_boot_read(ctrl, LKPI_MHI_STATUS, &status);
++		if (error != 0)
++			goto fail;
++		if ((status & 4) != 0 || (boot->status >> 30) == 3) {
++			error = EIO;
++			goto fail;
++		}
++		if ((boot->status >> 30) == 2)
++			return (0);
++		if (sbinuptime() >= deadline)
++			break;
++		pause_sbt("mhibhi", SBT_1MS, 0, C_HARDCLOCK);
++	} while (true);
++	error = ETIMEDOUT;
++fail:
++	pr_err("%s: BHI transfer failed: %d (status=%#x EE=%u pending=%u)\n",
++	    __func__, error, boot->status, boot->ee, boot->pending);
++	return (-error);
++}
++
++int
++linuxkpi_mhi_boot_bhie(struct mhi_controller *ctrl, struct lkpi_mhi_boot *boot,
++    const void *data, size_t length)
++{
++	struct lkpi_mhi_vector *vectors;
++	struct lkpi_mhi_dma *segment;
++	sbintime_t deadline;
++	const uint8_t *bytes = data;
++	size_t remaining, size;
++	uint32_t status, doorbell, limit;
++	unsigned int i;
++	int error;
++
++	if (ctrl == NULL || boot == NULL || data == NULL || length == 0 ||
++	    length > UINT32_MAX || ctrl->cntrl_dev == NULL ||
++	    ctrl->cntrl_dev->bsddev == NULL || ctrl->lkpi_context == NULL ||
++	    !ctrl->lkpi_context->published || !boot->pending ||
++	    boot->segments != NULL || ctrl->regs == NULL ||
++	    ctrl->read_reg == NULL || ctrl->write_reg == NULL ||
++	    ctrl->reg_len < 0xac || ctrl->timeout_ms == 0 ||
++	    ctrl->timeout_ms > 10000 || ctrl->iova_start > ctrl->iova_stop) {
++		pr_err("%s: invalid BHIE transfer parameters\n", __func__);
++		return (-EINVAL);
++	}
++	boot->bhie_status = 0;
++	error = mhi_boot_read(ctrl, 0x2c, &boot->bhie);
++	if (error != 0)
++		goto fail;
++	limit = MIN(ctrl->reg_len, 0xfe0);
++	if (boot->bhie < 0xb0 || (boot->bhie & 3) != 0 ||
++	    boot->bhie > limit - 0x7c ||
++	    mhi_ranges_overlap(boot->bhie, 0x7c, boot->bhi, 0x40) ||
++	    mhi_ranges_overlap(boot->bhie, 0x7c,
++	    ctrl->lkpi_context->channel_db,
++	    MAX(ctrl->lkpi_context->max_channels, 128) * 8) ||
++	    mhi_ranges_overlap(boot->bhie, 0x7c,
++	    ctrl->lkpi_context->event_db, ctrl->lkpi_context->num_events * 8)) {
++		error = EINVAL;
++		goto fail;
++	}
++	error = mhi_boot_read(ctrl, LKPI_MHI_STATUS, &status);
++	if (error != 0)
++		goto fail;
++	error = mhi_boot_read(ctrl, boot->bhi + LKPI_MHI_BHI_EXECENV,
++	    &boot->ee);
++	if (error != 0)
++		goto fail;
++	if ((status & 0xff04) != 0x200 || boot->ee != 1) {
++		error = EBUSY;
++		goto fail;
++	}
++	error = mhi_boot_read(ctrl, boot->bhie + 0x3c, &doorbell);
++	if (error != 0)
++		goto fail;
++	boot->num_segments = 1 + (length - 1) / LKPI_MHI_BHI_SIZE;
++	boot->segments = mallocarray(boot->num_segments,
++	    sizeof(*boot->segments), M_LKPIMHI, M_NOWAIT | M_ZERO);
++	if (boot->segments == NULL) {
++		error = ENOMEM;
++		goto fail_alloc;
++	}
++	remaining = length;
++	for (i = 0; i < boot->num_segments; i++) {
++		segment = &boot->segments[i];
++		size = MIN(remaining, LKPI_MHI_BHI_SIZE);
++		error = mhi_dma_alloc(ctrl, segment, size, 64);
++		if (error != 0)
++			goto fail_alloc;
++		memcpy(segment->vaddr, bytes, size);
++		mhi_dma_sync(segment);
++		bytes += size;
++		remaining -= size;
++	}
++	error = mhi_dma_alloc(ctrl, &boot->vectors,
++	    boot->num_segments * sizeof(*vectors), 64);
++	if (error != 0)
++		goto fail_alloc;
++	vectors = boot->vectors.vaddr;
++	for (i = 0; i < boot->num_segments; i++) {
++		vectors[i].address = htole64(boot->segments[i].address);
++		vectors[i].length = htole64(boot->segments[i].size);
++	}
++	mhi_dma_sync(&boot->vectors);
++	/* Keep the complete vector/image allocation until the boot reset. */
++	mhi_boot_write64(ctrl, boot->bhie + 0x2c, boot->vectors.address);
++	mhi_boot_write(ctrl, boot->bhie + 0x34, boot->vectors.size);
++	doorbell = (doorbell & ~0x3fffffffU) |
++	    (arc4random_uniform(0x3fffffff) + 1);
++	mhi_boot_write(ctrl, boot->bhie + 0x3c, doorbell);
++	deadline = sbinuptime() + ctrl->timeout_ms * SBT_1MS;
++	do {
++		error = -linuxkpi_mhi_process_events(ctrl);
++		if (error != 0)
++			goto fail;
++		error = mhi_boot_read(ctrl, boot->bhie + 0x44,
++		    &boot->bhie_status);
++		if (error != 0)
++			goto fail;
++		error = mhi_boot_read(ctrl, LKPI_MHI_STATUS, &status);
++		if (error != 0)
++			goto fail;
++		if ((status & 4) != 0 || (boot->bhie_status >> 30) == 3) {
++			error = EIO;
++			goto fail;
++		}
++		if ((boot->bhie_status >> 30) == 2)
++			return (mhi_boot_wait_ee(ctrl, boot, 2));
++		pause_sbt("mhibhie", SBT_1MS, 0, C_HARDCLOCK);
++	} while (sbinuptime() < deadline);
++	error = ETIMEDOUT;
++	goto fail;
++fail_alloc:
++	/*
++	 * These buffers have not been published; the earlier BHI image
++	 * stays.
++	 */
++	mhi_boot_free_firmware(boot);
++fail:
++	pr_err("%s: BHIE transfer failed: %d (status=%#x EE=%u)\n",
++	    __func__, error, boot->bhie_status, boot->ee);
++	return (-error);
++}
++
+ struct mhi_controller *
+ linuxkpi_mhi_alloc_controller(void)
+ {
+@@ -49,7 +1392,20 @@ void
+ linuxkpi_mhi_free_controller(struct mhi_controller *mhi_ctrl)
+ {
+ 
+-	/* What else do we need to check that it is gone? */
++	if (mhi_ctrl == NULL)
++		return;
++	linuxkpi_mhi_unregister_controller(mhi_ctrl);
++	if (mhi_ctrl->lkpi_runtime != NULL) {
++		pr_err("%s: retaining controller pending verified SoC reset\n",
++		    __func__);
++		return;
++	}
++	linuxkpi_mhi_free_context(mhi_ctrl);
++	if (mhi_ctrl != NULL && mhi_ctrl->lkpi_context != NULL) {
++		pr_err("%s: retaining controller with active DMA contexts\n",
++		    __func__);
++		return;
++	}
+ 	free(mhi_ctrl, M_LKPIMHI);
+ }
+ 
+@@ -57,8 +1413,11 @@ int
+ linuxkpi_mhi_register_controller(struct mhi_controller *mhi_ctrl,
+     const struct mhi_controller_config *cfg)
+ {
++	struct lkpi_mhi_runtime *runtime;
++	int error, i, j;
+ 
+-	if (mhi_ctrl == NULL || cfg == NULL)
++	if (mhi_ctrl == NULL || cfg == NULL || mhi_ctrl->lkpi_runtime != NULL ||
++	    mhi_ctrl->lkpi_context != NULL)
+ 		return (-EINVAL);
+ 
+ #define	CHECK_FIELD(_f)						\
+@@ -77,13 +1436,337 @@ linuxkpi_mhi_register_controller(struct mhi_controller *mhi_ctrl,
+ 	CHECK_FIELD(write_reg);
+ #undef CHECK_FIELD
+ 
+-	printf("%s: XXX-BZ TODO\n", __func__);
++	error = mhi_config_valid(cfg);
++	if (error != 0)
++		return (-error);
++	/*
++	 * Shared-vector teardown in LinuxKPI cannot yet distinguish owners.
++	 * Accept only the separately routed MSI layout exercised by WCN7850.
++	 */
++	if (mhi_ctrl->nr_irqs < 3 || cfg->buf_len != 8192 ||
++	    cfg->num_channels != 2 || cfg->ch_cfg[0].num != 20 ||
++	    cfg->ch_cfg[1].num != 21 ||
++	    cfg->ch_cfg[0].dir != DMA_TO_DEVICE ||
++	    cfg->ch_cfg[1].dir != DMA_FROM_DEVICE)
++		return (-EOPNOTSUPP);
++	for (i = 0; i < cfg->num_events; i++)
++		if (cfg->event_cfg[i].irq >= mhi_ctrl->nr_irqs)
++			return (-EINVAL);
++	for (i = 0; i < mhi_ctrl->nr_irqs; i++) {
++		if (mhi_ctrl->irq[i] <= 0)
++			return (-EINVAL);
++		for (j = 0; j < i; j++)
++			if (mhi_ctrl->irq[i] == mhi_ctrl->irq[j])
++				return (-EOPNOTSUPP);
++	}
++	runtime = malloc(sizeof(*runtime), M_LKPIMHI, M_NOWAIT | M_ZERO);
++	if (runtime == NULL)
++		return (-ENOMEM);
++	runtime->config = cfg;
++	mhi_ctrl->lkpi_runtime = runtime;
+ 	return (0);
+ }
+ 
+ void
+ linuxkpi_mhi_unregister_controller(struct mhi_controller *mhi_ctrl)
+ {
++	struct lkpi_mhi_runtime *runtime;
+ 
+-	pr_debug("%s: TODO\n", __func__);
++	if (mhi_ctrl == NULL || (runtime = mhi_ctrl->lkpi_runtime) == NULL)
++		return;
++	linuxkpi_mhi_power_down(mhi_ctrl);
++	linuxkpi_mhi_unprepare(mhi_ctrl);
++	if (runtime->prepared || linuxkpi_mhi_dma_owned(mhi_ctrl)) {
++		pr_err("%s: controller still owns DMA; refusing unregister\n",
++		    __func__);
++		return;
++	}
++	free(runtime, M_LKPIMHI);
++	mhi_ctrl->lkpi_runtime = NULL;
++}
++
++bool
++linuxkpi_mhi_dma_owned(struct mhi_controller *ctrl)
++{
++	return (ctrl != NULL &&
++	    ((ctrl->lkpi_runtime != NULL && ctrl->lkpi_runtime->boot.pending) ||
++	    (ctrl->lkpi_context != NULL && ctrl->lkpi_context->published)));
++}
++
++static irqreturn_t
++mhi_controller_intr(int irq __unused, void *arg)
++{
++	struct mhi_controller *ctrl = arg;
++
++	(void)linuxkpi_mhi_process_events(ctrl);
++	return (IRQ_HANDLED);
++}
++
++static void
++mhi_controller_free_irqs(struct mhi_controller *ctrl)
++{
++	struct lkpi_mhi_runtime *runtime = ctrl->lkpi_runtime;
++
++	while (runtime->irqs != 0) {
++		runtime->irqs--;
++		free_irq(ctrl->irq[runtime->irqs], ctrl);
++	}
++}
++
++int
++linuxkpi_mhi_prepare(struct mhi_controller *ctrl)
++{
++	struct lkpi_mhi_runtime *runtime;
++	int error;
++
++	if (ctrl == NULL || (runtime = ctrl->lkpi_runtime) == NULL)
++		return (-EOPNOTSUPP);
++	if (runtime->prepared || linuxkpi_mhi_dma_owned(ctrl))
++		return (-EBUSY);
++	if (ctrl->timeout_ms == 0 || ctrl->timeout_ms > 10000 ||
++	    !ctrl->fbc_download || ctrl->sbl_size != LKPI_MHI_BHI_SIZE ||
++	    ctrl->seg_len != LKPI_MHI_BHI_SIZE)
++		return (-EOPNOTSUPP);
++	error = linuxkpi_mhi_alloc_context(ctrl, runtime->config);
++	if (error != 0)
++		return (error);
++	ctrl->lkpi_context->receive = runtime->receive;
++	ctrl->lkpi_context->receive_arg = runtime->receive_arg;
++	error = linuxkpi_mhi_alloc_transfer(ctrl, 20);
++	if (error == 0)
++		error = linuxkpi_mhi_alloc_transfer(ctrl, 21);
++	if (error != 0)
++		goto fail;
++	while (runtime->irqs < ctrl->nr_irqs) {
++		error = request_irq(ctrl->irq[runtime->irqs],
++		    mhi_controller_intr, ctrl->irq_flags, "mhi", ctrl);
++		if (error != 0)
++			goto fail;
++		runtime->irqs++;
++	}
++	runtime->prepared = true;
++	return (0);
++fail:
++	mhi_controller_free_irqs(ctrl);
++	linuxkpi_mhi_free_context(ctrl);
++	return (error);
++}
++
++int
++linuxkpi_mhi_power_up(struct mhi_controller *ctrl)
++{
++	const struct firmware *firmware = NULL;
++	struct lkpi_mhi_runtime *runtime;
++	const uint8_t *data;
++	size_t length;
++	int error;
++
++	if (ctrl == NULL || (runtime = ctrl->lkpi_runtime) == NULL ||
++	    !runtime->prepared)
++		return (-ENXIO);
++	/*
++	 * Do not boot firmware without an installed, lifetime-owned
++	 * consumer.
++	 */
++	if (ctrl->lkpi_context == NULL || ctrl->lkpi_context->receive == NULL)
++		return (-ENXIO);
++	if (runtime->powered || linuxkpi_mhi_dma_owned(ctrl))
++		return (-EBUSY);
++	data = ctrl->fw_data;
++	length = ctrl->fw_sz;
++	if (data == NULL) {
++		if (ctrl->fw_image == NULL)
++			return (-ENOENT);
++		error = request_firmware(&firmware, ctrl->fw_image,
++		    ctrl->cntrl_dev);
++		if (error != 0)
++			return (error);
++		data = firmware->data;
++		length = firmware->size;
++	}
++	if (length < ctrl->sbl_size) {
++		error = -EINVAL;
++		goto out;
++	}
++	error = linuxkpi_mhi_boot_bhi(ctrl, &runtime->boot, data,
++	    ctrl->sbl_size);
++	if (error != 0)
++		goto out;
++	error = linuxkpi_mhi_boot_ready(ctrl, &runtime->boot);
++	if (error != 0)
++		goto out;
++	/*
++	 * Combined SBL + ELF images use the same split as the proven lab
++	 * path.
++	 */
++	if (length >= ctrl->sbl_size + 4 &&
++	    memcmp(data + ctrl->sbl_size, "\177ELF", 4) == 0) {
++		data += ctrl->sbl_size;
++		length -= ctrl->sbl_size;
++	}
++	error = linuxkpi_mhi_boot_bhie(ctrl, &runtime->boot, data, length);
++	if (error == 0) {
++		runtime->powered = true;
++		error = linuxkpi_mhi_start_transport(ctrl);
++	}
++out:
++	if (firmware != NULL)
++		release_firmware(firmware);
++	if (error == 0)
++		ctrl->status_cb(ctrl, MHI_CB_EE_MISSION_MODE);
++	/* Errors after publication deliberately retain every DMA mapping. */
++	return (error);
++}
++
++void
++linuxkpi_mhi_power_down(struct mhi_controller *ctrl)
++{
++	struct lkpi_mhi_context *context;
++
++	if (ctrl == NULL || (context = ctrl->lkpi_context) == NULL)
++		return;
++	mtx_lock(&context->lock);
++	context->quiescing = true;
++	wakeup(context);
++	mtx_unlock(&context->lock);
++}
++
++int
++linuxkpi_mhi_reset_complete(struct mhi_controller *ctrl)
++{
++	struct lkpi_mhi_runtime *runtime;
++	struct lkpi_mhi_context *context;
++	sbintime_t deadline;
++	uint32_t control, status, bhi, ee;
++	int error;
++
++	if (ctrl == NULL || (runtime = ctrl->lkpi_runtime) == NULL)
++		return (-ENXIO);
++	context = ctrl->lkpi_context;
++	if (context != NULL && !context->quiescing)
++		return (-EBUSY);
++	error = mhi_boot_read(ctrl, LKPI_MHI_BHI_OFFSET, &bhi);
++	if (error != 0)
++		return (-error);
++	if (bhi < 0xb0 || (bhi & 3) != 0 ||
++	    bhi > MIN(ctrl->reg_len, 0xfe0) - 0x40)
++		return (-EIO);
++	deadline = sbinuptime() + SBT_1S;
++	do {
++		error = mhi_boot_read(ctrl, LKPI_MHI_CTRL, &control);
++		if (error == 0)
++			error = mhi_boot_read(ctrl, LKPI_MHI_STATUS, &status);
++		if (error == 0)
++			error = mhi_boot_read(ctrl, bhi + LKPI_MHI_BHI_EXECENV,
++			    &ee);
++		if (error != 0)
++			return (-error);
++		if ((control & 0xff02) == 0 && (status & 0xff05) == 0 &&
++		    ee == 0) {
++			runtime->boot.pending = false;
++			runtime->powered = runtime->transport_started = false;
++			if (context != NULL) {
++				mtx_lock(&context->lock);
++				context->published = false;
++				mtx_unlock(&context->lock);
++			}
++			return (0);
++		}
++		pause_sbt("mhipbl", SBT_1MS, 0, C_HARDCLOCK);
++	} while (sbinuptime() < deadline);
++	return (-ETIMEDOUT);
++}
++
++void
++linuxkpi_mhi_unprepare(struct mhi_controller *ctrl)
++{
++	struct lkpi_mhi_runtime *runtime;
++
++	if (ctrl == NULL)
++		return;
++	runtime = ctrl->lkpi_runtime;
++	if (runtime == NULL) {
++		linuxkpi_mhi_free_context(ctrl);
++		return;
++	}
++	if (linuxkpi_mhi_dma_owned(ctrl)) {
++		pr_err("%s: verified SoC reset required; retaining DMA and "
++		    "IRQs\n", __func__);
++		return;
++	}
++	mhi_controller_free_irqs(ctrl);
++	(void)linuxkpi_mhi_boot_free(&runtime->boot);
++	linuxkpi_mhi_free_context(ctrl);
++	runtime->prepared = false;
++}
++
++int
++linuxkpi_mhi_set_receive(struct mhi_controller *ctrl,
++    int (*receive)(void *, const void *, size_t), void *arg)
++{
++	struct lkpi_mhi_runtime *runtime;
++	struct lkpi_mhi_context *context;
++	int error = 0;
++
++	if (ctrl == NULL || (runtime = ctrl->lkpi_runtime) == NULL ||
++	    (receive == NULL && arg != NULL))
++		return (-EINVAL);
++	context = ctrl->lkpi_context;
++	if (context != NULL)
++		mtx_lock(&context->lock);
++	if (linuxkpi_mhi_dma_owned(ctrl) ||
++	    (receive != NULL && runtime->receive != NULL))
++		error = -EBUSY;
++	else {
++		runtime->receive = receive;
++		runtime->receive_arg = arg;
++		if (context != NULL) {
++			context->receive = receive;
++			context->receive_arg = arg;
++		}
++	}
++	if (context != NULL)
++		mtx_unlock(&context->lock);
++	return (error);
++}
++
++int
++linuxkpi_mhi_start_transport(struct mhi_controller *ctrl)
++{
++	struct lkpi_mhi_runtime *runtime;
++	struct lkpi_mhi_context *context;
++	sbintime_t deadline;
++	unsigned int channel;
++	int error;
++
++	if (ctrl == NULL || (runtime = ctrl->lkpi_runtime) == NULL ||
++	    !runtime->powered || ctrl->lkpi_context == NULL ||
++	    ctrl->lkpi_context->receive == NULL)
++		return (-ENXIO);
++	if (runtime->transport_started)
++		return (-EBUSY);
++	context = ctrl->lkpi_context;
++	for (channel = 20; channel <= 21; channel++) {
++		error = linuxkpi_mhi_start_channel(ctrl, channel);
++		if (error != 0)
++			return (error);
++		deadline = sbinuptime() + ctrl->timeout_ms * SBT_1MS;
++		mtx_lock(&context->lock);
++		while (!context->transfers[channel].started &&
++		    context->event_error == 0 && !context->quiescing) {
++			error = msleep_sbt(context, &context->lock, 0,
++			    "mhiipcr", deadline, 0, C_ABSOLUTE);
++			if (error != 0)
++				break;
++		}
++		if (context->event_error != 0)
++			error = context->event_error;
++		else if (context->quiescing)
++			error = ECANCELED;
++		mtx_unlock(&context->lock);
++		if (error != 0)
++			return (-error);
++	}
++	runtime->transport_started = true;
++	return (0);
+ }
+diff --git a/sys/compat/linuxkpi/common/src/linux_mhi.h b/sys/compat/linuxkpi/common/src/linux_mhi.h
+new file mode 100644
+index 00000000000..957b718c38b
+--- /dev/null
++++ b/sys/compat/linuxkpi/common/src/linux_mhi.h
+@@ -0,0 +1,155 @@
++/*-
++ * SPDX-License-Identifier: BSD-2-Clause
++ */
++#ifndef _LINUXKPI_MHI_INTERNAL_H_
++#define _LINUXKPI_MHI_INTERNAL_H_
++
++#include <sys/param.h>
++#include <sys/bus.h>
++#include <sys/lock.h>
++#include <sys/mutex.h>
++#include <machine/bus.h>
++#include <linux/mhi.h>
++
++struct lkpi_mhi_channel_context {
++	uint32_t chcfg, chtype, erindex;
++	uint64_t rbase, rlen, rp, wp;
++} __packed;
++
++struct lkpi_mhi_event_context {
++	uint32_t intmod, ertype, msivec;
++	uint64_t rbase, rlen, rp, wp;
++} __packed;
++
++struct lkpi_mhi_command_context {
++	uint32_t reserved[3];
++	uint64_t rbase, rlen, rp, wp;
++} __packed;
++
++struct lkpi_mhi_tre {
++	uint64_t ptr;
++	uint32_t dword[2];
++} __packed;
++
++CTASSERT(sizeof(struct lkpi_mhi_channel_context) == 44);
++CTASSERT(sizeof(struct lkpi_mhi_event_context) == 44);
++CTASSERT(sizeof(struct lkpi_mhi_command_context) == 44);
++CTASSERT(sizeof(struct lkpi_mhi_tre) == 16);
++
++struct lkpi_mhi_dma {
++	bus_dma_tag_t tag;
++	bus_dmamap_t map;
++	void *vaddr;
++	bus_addr_t address;
++	size_t size;
++	bool loaded, synced;
++};
++
++struct lkpi_mhi_event_ring {
++	struct lkpi_mhi_dma dma;
++	size_t read_offset, write_offset;
++	unsigned int irq;
++	unsigned int type;
++};
++
++struct lkpi_mhi_slot {
++	struct lkpi_mhi_dma dma;
++	size_t length;
++};
++
++struct lkpi_mhi_xfer {
++	struct lkpi_mhi_slot *slots;
++	size_t read_offset, write_offset;
++	unsigned int count, queued, direction, event_ring;
++	bool starting, started;
++};
++
++struct lkpi_mhi_context {
++	struct mtx lock;
++	struct lkpi_mhi_dma channels, events, commands, command_ring;
++	struct lkpi_mhi_dma *channel_rings;
++	struct lkpi_mhi_xfer *transfers;
++	struct lkpi_mhi_event_ring *event_rings;
++	unsigned int max_channels, num_events;
++	uint32_t channel_db, event_db, state, ee;
++	unsigned int state_events, ee_events;
++	size_t command_read, command_write;
++	unsigned int command_channel, command_type, command_events;
++	unsigned int tx_packets, rx_packets;
++	unsigned int rx_length;
++	/* Bounded lab observation, not an upper-layer receive queue. */
++	uint8_t rx_sample[64];
++	/*
++	 * Under lock: positive errno on failure; no sleep or retained DMA
++	 * pointer.
++	 */
++	int (*receive)(void *, const void *, size_t);
++	void *receive_arg;
++	int event_error;
++	bool published, command_pending, stopping, quiescing;
++};
++
++#define LKPI_MHI_BHI_SIZE		(512 * 1024)
++#define LKPI_MHI_BHI_OFFSET	0x28
++#define LKPI_MHI_CTRL		0x38
++#define LKPI_MHI_STATUS		0x48
++#define LKPI_MHI_BHI_EXECENV	0x28
++#define LKPI_MHI_BHI_STATUS	0x2c
++
++struct lkpi_mhi_vector {
++	uint64_t address, length;
++} __packed;
++
++CTASSERT(sizeof(struct lkpi_mhi_vector) == 16);
++
++struct lkpi_mhi_boot {
++	struct lkpi_mhi_dma image;
++	struct lkpi_mhi_dma *segments;
++	struct lkpi_mhi_dma vectors;
++	unsigned int num_segments;
++	uint32_t bhi, status, ee;
++	uint32_t bhie, bhie_status;
++	bool pending;
++};
++
++struct lkpi_mhi_runtime {
++	const struct mhi_controller_config *config;
++	struct lkpi_mhi_boot boot;
++	int (*receive)(void *, const void *, size_t);
++	void *receive_arg;
++	unsigned int irqs;
++	bool prepared, powered, transport_started;
++};
++
++/*
++ * Caller serializes allocation/free and keeps the device quiescent
++ * throughout.
++ */
++int linuxkpi_mhi_alloc_context(struct mhi_controller *,
++    const struct mhi_controller_config *);
++
++/*
++ * After publication, retain the image until the caller confirms device
++ * reset.
++ */
++int linuxkpi_mhi_boot_bhi(struct mhi_controller *, struct lkpi_mhi_boot *,
++    const void *, size_t);
++int linuxkpi_mhi_boot_ready(struct mhi_controller *, struct lkpi_mhi_boot *);
++int linuxkpi_mhi_boot_bhie(struct mhi_controller *, struct lkpi_mhi_boot *,
++    const void *, size_t);
++int linuxkpi_mhi_process_events(struct mhi_controller *);
++int linuxkpi_mhi_stop_channel(struct mhi_controller *, unsigned int);
++int linuxkpi_mhi_alloc_transfer(struct mhi_controller *, unsigned int);
++int linuxkpi_mhi_start_channel(struct mhi_controller *, unsigned int);
++int linuxkpi_mhi_submit(struct mhi_controller *, unsigned int,
++    const void *, size_t);
++int linuxkpi_mhi_boot_free(struct lkpi_mhi_boot *);
++/*
++ * Address-bearing QMI messages keep these buffers owned until verified
++ * reset.
++ */
++int linuxkpi_mhi_alloc_memory(struct mhi_controller *, struct lkpi_mhi_dma *,
++    size_t);
++int linuxkpi_mhi_free_memory(struct mhi_controller *, struct lkpi_mhi_dma *);
++
++#endif
+-- 
+2.56.0
+

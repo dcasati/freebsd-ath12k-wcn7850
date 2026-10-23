@@ -1,9 +1,11 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From e79b42c33d0f301b5ba599af9e05584d45a8cbf9 Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 14:44:31 -0600
-Subject: [PATCH 06/14] amd64: add ATH12KHOST and ATH12KLAB kernel configs
+Subject: [PATCH 08/10] amd64: add ATH12KHOST and ATH12KLAB kernel configs
 
-GENERIC plus INVARIANTS/WITNESS for ath12k bring-up and testing.
+GENERIC plus INVARIANTS/WITNESS for ath12k bring-up.
+
+Local only; not intended for upstream.
 
 Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
 ---
@@ -15,7 +17,7 @@ Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
 
 diff --git a/sys/amd64/conf/ATH12KHOST b/sys/amd64/conf/ATH12KHOST
 new file mode 100644
-index 00000000..48a70939
+index 00000000000..48a709394ce
 --- /dev/null
 +++ b/sys/amd64/conf/ATH12KHOST
 @@ -0,0 +1,7 @@
@@ -28,7 +30,7 @@ index 00000000..48a70939
 +options WITNESS_SKIPSPIN
 diff --git a/sys/amd64/conf/ATH12KLAB b/sys/amd64/conf/ATH12KLAB
 new file mode 100644
-index 00000000..55db98bf
+index 00000000000..55db98bf2a7
 --- /dev/null
 +++ b/sys/amd64/conf/ATH12KLAB
 @@ -0,0 +1,7 @@

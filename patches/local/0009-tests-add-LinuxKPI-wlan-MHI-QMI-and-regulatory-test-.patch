@@ -1,7 +1,16 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 43cfbf7fbba97265cc7349e6c439660e9edb5be0 Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 14:44:31 -0600
-Subject: [PATCH 07/14] tests: add LinuxKPI wlan, MHI, QMI and regulatory tests
+Subject: [PATCH 09/10] tests: add LinuxKPI wlan, MHI, QMI and regulatory test
+ harnesses
+
+Kernel test modules and bring-up harnesses used during development.
+The MHI harness carries its own copy of the WCN7850 CE and register
+tables (wcn7850_tables.c, ce_config.h) so the vendor sources stay
+unmodified.
+
+Local only.  Candidates for conversion to ktest(9) with ATF wrappers
+before going upstream.
 
 Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
 ---
@@ -9,11 +18,12 @@ Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
  sys/modules/tests/linuxkpi_mhi_boot/Makefile  |   14 +
  .../tests/linuxkpi_regulatory/Makefile        |    8 +
  sys/modules/tests/linuxkpi_wlan/Makefile      |    8 +
+ sys/tests/linuxkpi_wlan/ce_config.h           |   60 +
  sys/tests/linuxkpi_wlan/compat_test.c         |  558 +++++
  sys/tests/linuxkpi_wlan/dp_cc_test.c          |   96 +
  sys/tests/linuxkpi_wlan/dp_native_test.c      |  124 ++
  sys/tests/linuxkpi_wlan/mhi_boot.c            | 1329 +++++++++++
- sys/tests/linuxkpi_wlan/mhi_ce.c              |  758 +++++++
+ sys/tests/linuxkpi_wlan/mhi_ce.c              |  759 +++++++
  sys/tests/linuxkpi_wlan/mhi_ce.h              |   85 +
  sys/tests/linuxkpi_wlan/mhi_lifecycle_test.c  |  170 ++
  sys/tests/linuxkpi_wlan/mhi_qmi.c             |  693 ++++++
@@ -34,12 +44,14 @@ Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
  .../linuxkpi_wlan/station_port_worker_test.py |  180 ++
  .../station_tx_descriptor_test.py             |  109 +
  .../linuxkpi_wlan/station_tx_lock_test.py     |  184 ++
+ sys/tests/linuxkpi_wlan/wcn7850_tables.c      |  276 +++
  sys/tests/linuxkpi_wlan/wmi_protocol_test.c   |  164 ++
- 30 files changed, 9482 insertions(+)
+ 32 files changed, 9819 insertions(+)
  create mode 100644 sys/modules/tests/linuxkpi_mhi/Makefile
  create mode 100644 sys/modules/tests/linuxkpi_mhi_boot/Makefile
  create mode 100644 sys/modules/tests/linuxkpi_regulatory/Makefile
  create mode 100644 sys/modules/tests/linuxkpi_wlan/Makefile
+ create mode 100644 sys/tests/linuxkpi_wlan/ce_config.h
  create mode 100644 sys/tests/linuxkpi_wlan/compat_test.c
  create mode 100644 sys/tests/linuxkpi_wlan/dp_cc_test.c
  create mode 100644 sys/tests/linuxkpi_wlan/dp_native_test.c
@@ -65,11 +77,12 @@ Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
  create mode 100644 sys/tests/linuxkpi_wlan/station_port_worker_test.py
  create mode 100644 sys/tests/linuxkpi_wlan/station_tx_descriptor_test.py
  create mode 100644 sys/tests/linuxkpi_wlan/station_tx_lock_test.py
+ create mode 100644 sys/tests/linuxkpi_wlan/wcn7850_tables.c
  create mode 100644 sys/tests/linuxkpi_wlan/wmi_protocol_test.c
 
 diff --git a/sys/modules/tests/linuxkpi_mhi/Makefile b/sys/modules/tests/linuxkpi_mhi/Makefile
 new file mode 100644
-index 00000000..a1b1afd5
+index 00000000000..451cf34783f
 --- /dev/null
 +++ b/sys/modules/tests/linuxkpi_mhi/Makefile
 @@ -0,0 +1,16 @@
@@ -77,8 +90,8 @@ index 00000000..a1b1afd5
 +.PATH: ${SRCTOP}/sys/tests/linuxkpi_wlan ${DEVATH12KDIR}/wifi7
 +
 +KMOD=	lkpi_mhi_test
-+SRCS=	mhi_test.c mhi_qmi.c mhi.c ce_wcn7850.c
-+SRCS+=	mhi_ce.c mhi_wmi.c hal_wcn7850_regs.c
++SRCS=	mhi_test.c mhi_qmi.c mhi.c
++SRCS+=	mhi_ce.c mhi_wmi.c wcn7850_tables.c
 +SRCS+=	mhi_lifecycle_test.c
 +SRCS+=	wmi_protocol_test.c
 +SRCS+=	${LINUXKPI_GENSRCS}
@@ -91,7 +104,7 @@ index 00000000..a1b1afd5
 +.include <bsd.kmod.mk>
 diff --git a/sys/modules/tests/linuxkpi_mhi_boot/Makefile b/sys/modules/tests/linuxkpi_mhi_boot/Makefile
 new file mode 100644
-index 00000000..aa397057
+index 00000000000..379fbc92f96
 --- /dev/null
 +++ b/sys/modules/tests/linuxkpi_mhi_boot/Makefile
 @@ -0,0 +1,14 @@
@@ -99,8 +112,8 @@ index 00000000..aa397057
 +.PATH: ${SRCTOP}/sys/tests/linuxkpi_wlan ${DEVATH12KDIR}/wifi7
 +
 +KMOD=	lkpi_mhi_boot
-+SRCS=	mhi_boot.c mhi_qmi.c mhi.c ce_wcn7850.c device_if.h bus_if.h pci_if.h
-+SRCS+=	mhi_ce.c mhi_wmi.c hal_wcn7850_regs.c
++SRCS=	mhi_boot.c mhi_qmi.c mhi.c device_if.h bus_if.h pci_if.h
++SRCS+=	mhi_ce.c mhi_wmi.c wcn7850_tables.c
 +SRCS+=	${LINUXKPI_GENSRCS}
 +SRCS+=	opt_wlan.h opt_inet6.h opt_inet.h opt_acpi.h
 +CFLAGS+=	${LINUXKPI_INCLUDES}
@@ -111,7 +124,7 @@ index 00000000..aa397057
 +.include <bsd.kmod.mk>
 diff --git a/sys/modules/tests/linuxkpi_regulatory/Makefile b/sys/modules/tests/linuxkpi_regulatory/Makefile
 new file mode 100644
-index 00000000..82807d95
+index 00000000000..82807d95013
 --- /dev/null
 +++ b/sys/modules/tests/linuxkpi_regulatory/Makefile
 @@ -0,0 +1,8 @@
@@ -125,7 +138,7 @@ index 00000000..82807d95
 +.include <bsd.kmod.mk>
 diff --git a/sys/modules/tests/linuxkpi_wlan/Makefile b/sys/modules/tests/linuxkpi_wlan/Makefile
 new file mode 100644
-index 00000000..e373ced1
+index 00000000000..e373ced1054
 --- /dev/null
 +++ b/sys/modules/tests/linuxkpi_wlan/Makefile
 @@ -0,0 +1,8 @@
@@ -137,9 +150,75 @@ index 00000000..e373ced1
 +CFLAGS+=	${LINUXKPI_INCLUDES}
 +
 +.include <bsd.kmod.mk>
+diff --git a/sys/tests/linuxkpi_wlan/ce_config.h b/sys/tests/linuxkpi_wlan/ce_config.h
+new file mode 100644
+index 00000000000..3404922be79
+--- /dev/null
++++ b/sys/tests/linuxkpi_wlan/ce_config.h
+@@ -0,0 +1,60 @@
++/* SPDX-License-Identifier: BSD-3-Clause-Clear */
++/*
++ * Copyright (c) 2018-2021 The Linux Foundation. All rights reserved.
++ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
++ */
++/*
++ * Minimal copy of the ath12k CE wire definitions and WCN7850 ring sizes
++ * for the MHI bring-up harness, which cannot include ce.h.  Values must
++ * match ce.h and wifi7/ce.c.
++ */
++#ifndef LKPI_TEST_CE_CONFIG_H
++#define LKPI_TEST_CE_CONFIG_H
++
++#include <linux/types.h>
++
++#ifndef ATH12K_CE_H
++#define CE_ATTR_BYTE_SWAP_DATA 2
++#define CE_ATTR_DIS_INTR 8
++#define CE_ATTR_FLAGS 0
++
++/* Pipe directions are relative to the host: IN is target to host. */
++#define PIPEDIR_NONE 0
++#define PIPEDIR_IN 1
++#define PIPEDIR_OUT 2
++#define PIPEDIR_INOUT 3
++#define PIPEDIR_INOUT_H2H 4
++
++/* Firmware configuration tables are stored in little-endian wire order. */
++struct service_to_pipe {
++	__le32 service_id;
++	__le32 pipedir;
++	__le32 pipenum;
++};
++
++struct ce_pipe_config {
++	__le32 pipenum;
++	__le32 pipedir;
++	__le32 nentries;
++	__le32 nbytes_max;
++	__le32 flags;
++	__le32 reserved;
++};
++#endif /* !ATH12K_CE_H */
++
++#define ATH12K_WCN7850_TARGET_CE_COUNT 9
++#define ATH12K_WCN7850_SERVICE_COUNT 14
++
++#define ATH12K_WCN7850_CE0_SRC_ENTRIES 16
++#define ATH12K_WCN7850_CE1_DST_ENTRIES 512
++#define ATH12K_WCN7850_CE2_DST_ENTRIES 64
++#define ATH12K_WCN7850_CE3_SRC_ENTRIES 32
++#define ATH12K_WCN7850_CE4_SRC_ENTRIES 2048
++#define ATH12K_WCN7850_CE_BUFFER_SIZE 2048
++
++extern const struct ce_pipe_config ath12k_wifi7_target_ce_config_wlan_wcn7850[
++    ATH12K_WCN7850_TARGET_CE_COUNT];
++extern const struct service_to_pipe ath12k_wifi7_target_service_to_ce_map_wlan_wcn7850[
++    ATH12K_WCN7850_SERVICE_COUNT + 1];
++
++#endif
 diff --git a/sys/tests/linuxkpi_wlan/compat_test.c b/sys/tests/linuxkpi_wlan/compat_test.c
 new file mode 100644
-index 00000000..79189b21
+index 00000000000..79189b2183a
 --- /dev/null
 +++ b/sys/tests/linuxkpi_wlan/compat_test.c
 @@ -0,0 +1,558 @@
@@ -703,7 +782,7 @@ index 00000000..79189b21
 +MODULE_DEPEND(lkpi_wlan_test, linuxkpi_wlan, 1, 1, 1);
 diff --git a/sys/tests/linuxkpi_wlan/dp_cc_test.c b/sys/tests/linuxkpi_wlan/dp_cc_test.c
 new file mode 100644
-index 00000000..2fdc590c
+index 00000000000..2fdc590c7c3
 --- /dev/null
 +++ b/sys/tests/linuxkpi_wlan/dp_cc_test.c
 @@ -0,0 +1,96 @@
@@ -805,7 +884,7 @@ index 00000000..2fdc590c
 +}
 diff --git a/sys/tests/linuxkpi_wlan/dp_native_test.c b/sys/tests/linuxkpi_wlan/dp_native_test.c
 new file mode 100644
-index 00000000..171872e3
+index 00000000000..171872e3622
 --- /dev/null
 +++ b/sys/tests/linuxkpi_wlan/dp_native_test.c
 @@ -0,0 +1,124 @@
@@ -935,7 +1014,7 @@ index 00000000..171872e3
 +}
 diff --git a/sys/tests/linuxkpi_wlan/mhi_boot.c b/sys/tests/linuxkpi_wlan/mhi_boot.c
 new file mode 100644
-index 00000000..a1b77777
+index 00000000000..a1b777771d4
 --- /dev/null
 +++ b/sys/tests/linuxkpi_wlan/mhi_boot.c
 @@ -0,0 +1,1329 @@
@@ -2270,10 +2349,10 @@ index 00000000..a1b77777
 +MODULE_DEPEND(lkpi_mhi_boot, firmware, 1, 1, 1);
 diff --git a/sys/tests/linuxkpi_wlan/mhi_ce.c b/sys/tests/linuxkpi_wlan/mhi_ce.c
 new file mode 100644
-index 00000000..178ce378
+index 00000000000..d1e8c018ab4
 --- /dev/null
 +++ b/sys/tests/linuxkpi_wlan/mhi_ce.c
-@@ -0,0 +1,758 @@
+@@ -0,0 +1,759 @@
 +/* SPDX-License-Identifier: BSD-3-Clause-Clear */
 +/*
 + * Copyright (c) 2018-2021 The Linux Foundation. All rights reserved.
@@ -2290,6 +2369,7 @@ index 00000000..178ce378
 +
 +#include "core.h"
 +#include "wifi7/hal_wcn7850.h"
++#include "ce_config.h"
 +#include "mhi_ce.h"
 +
 +static const struct {
@@ -3034,7 +3114,7 @@ index 00000000..178ce378
 +}
 diff --git a/sys/tests/linuxkpi_wlan/mhi_ce.h b/sys/tests/linuxkpi_wlan/mhi_ce.h
 new file mode 100644
-index 00000000..18c9a20e
+index 00000000000..18c9a20eb42
 --- /dev/null
 +++ b/sys/tests/linuxkpi_wlan/mhi_ce.h
 @@ -0,0 +1,85 @@
@@ -3125,7 +3205,7 @@ index 00000000..18c9a20e
 +#endif
 diff --git a/sys/tests/linuxkpi_wlan/mhi_lifecycle_test.c b/sys/tests/linuxkpi_wlan/mhi_lifecycle_test.c
 new file mode 100644
-index 00000000..5e580f2d
+index 00000000000..5e580f2d7aa
 --- /dev/null
 +++ b/sys/tests/linuxkpi_wlan/mhi_lifecycle_test.c
 @@ -0,0 +1,170 @@
@@ -3301,7 +3381,7 @@ index 00000000..5e580f2d
 +}
 diff --git a/sys/tests/linuxkpi_wlan/mhi_qmi.c b/sys/tests/linuxkpi_wlan/mhi_qmi.c
 new file mode 100644
-index 00000000..ade2660f
+index 00000000000..ade2660f42b
 --- /dev/null
 +++ b/sys/tests/linuxkpi_wlan/mhi_qmi.c
 @@ -0,0 +1,693 @@
@@ -4000,7 +4080,7 @@ index 00000000..ade2660f
 +}
 diff --git a/sys/tests/linuxkpi_wlan/mhi_qmi.h b/sys/tests/linuxkpi_wlan/mhi_qmi.h
 new file mode 100644
-index 00000000..bd799679
+index 00000000000..bd799679d23
 --- /dev/null
 +++ b/sys/tests/linuxkpi_wlan/mhi_qmi.h
 @@ -0,0 +1,61 @@
@@ -4067,7 +4147,7 @@ index 00000000..bd799679
 +#endif
 diff --git a/sys/tests/linuxkpi_wlan/mhi_test.c b/sys/tests/linuxkpi_wlan/mhi_test.c
 new file mode 100644
-index 00000000..9219ffda
+index 00000000000..9219ffdaa55
 --- /dev/null
 +++ b/sys/tests/linuxkpi_wlan/mhi_test.c
 @@ -0,0 +1,1958 @@
@@ -6031,7 +6111,7 @@ index 00000000..9219ffda
 +MODULE_DEPEND(lkpi_mhi_test, linuxkpi, 1, 1, 1);
 diff --git a/sys/tests/linuxkpi_wlan/mhi_wmi.c b/sys/tests/linuxkpi_wlan/mhi_wmi.c
 new file mode 100644
-index 00000000..4bdc74d1
+index 00000000000..4bdc74d109d
 --- /dev/null
 +++ b/sys/tests/linuxkpi_wlan/mhi_wmi.c
 @@ -0,0 +1,441 @@
@@ -6478,7 +6558,7 @@ index 00000000..4bdc74d1
 +}
 diff --git a/sys/tests/linuxkpi_wlan/mhi_wmi.h b/sys/tests/linuxkpi_wlan/mhi_wmi.h
 new file mode 100644
-index 00000000..97869305
+index 00000000000..97869305db9
 --- /dev/null
 +++ b/sys/tests/linuxkpi_wlan/mhi_wmi.h
 @@ -0,0 +1,65 @@
@@ -6549,7 +6629,7 @@ index 00000000..97869305
 +#endif
 diff --git a/sys/tests/linuxkpi_wlan/mhi_wmi_cases.h b/sys/tests/linuxkpi_wlan/mhi_wmi_cases.h
 new file mode 100644
-index 00000000..091cea19
+index 00000000000..091cea194a9
 --- /dev/null
 +++ b/sys/tests/linuxkpi_wlan/mhi_wmi_cases.h
 @@ -0,0 +1,291 @@
@@ -6846,7 +6926,7 @@ index 00000000..091cea19
 +#endif
 diff --git a/sys/tests/linuxkpi_wlan/qmi_native_test.c b/sys/tests/linuxkpi_wlan/qmi_native_test.c
 new file mode 100644
-index 00000000..bbe390d0
+index 00000000000..bbe390d0cfe
 --- /dev/null
 +++ b/sys/tests/linuxkpi_wlan/qmi_native_test.c
 @@ -0,0 +1,255 @@
@@ -7107,7 +7187,7 @@ index 00000000..bbe390d0
 +}
 diff --git a/sys/tests/linuxkpi_wlan/regulatory_production_test.py b/sys/tests/linuxkpi_wlan/regulatory_production_test.py
 new file mode 100644
-index 00000000..c38d6696
+index 00000000000..c38d66961ee
 --- /dev/null
 +++ b/sys/tests/linuxkpi_wlan/regulatory_production_test.py
 @@ -0,0 +1,369 @@
@@ -7482,7 +7562,7 @@ index 00000000..c38d6696
 +    main()
 diff --git a/sys/tests/linuxkpi_wlan/regulatory_test.c b/sys/tests/linuxkpi_wlan/regulatory_test.c
 new file mode 100644
-index 00000000..ed64db8e
+index 00000000000..ed64db8e4fe
 --- /dev/null
 +++ b/sys/tests/linuxkpi_wlan/regulatory_test.c
 @@ -0,0 +1,219 @@
@@ -7707,7 +7787,7 @@ index 00000000..ed64db8e
 +MODULE_VERSION(lkpi_regulatory_test, 1);
 diff --git a/sys/tests/linuxkpi_wlan/rhashtable_test.c b/sys/tests/linuxkpi_wlan/rhashtable_test.c
 new file mode 100644
-index 00000000..b5cadb7b
+index 00000000000..b5cadb7b4be
 --- /dev/null
 +++ b/sys/tests/linuxkpi_wlan/rhashtable_test.c
 @@ -0,0 +1,160 @@
@@ -7873,7 +7953,7 @@ index 00000000..b5cadb7b
 +}
 diff --git a/sys/tests/linuxkpi_wlan/station_acceptance.sh b/sys/tests/linuxkpi_wlan/station_acceptance.sh
 new file mode 100755
-index 00000000..30f50ac7
+index 00000000000..30f50ac7b3e
 --- /dev/null
 +++ b/sys/tests/linuxkpi_wlan/station_acceptance.sh
 @@ -0,0 +1,410 @@
@@ -8289,7 +8369,7 @@ index 00000000..30f50ac7
 +station_main "$@"
 diff --git a/sys/tests/linuxkpi_wlan/station_acceptance_test.py b/sys/tests/linuxkpi_wlan/station_acceptance_test.py
 new file mode 100755
-index 00000000..1fdda2ff
+index 00000000000..1fdda2ff9e9
 --- /dev/null
 +++ b/sys/tests/linuxkpi_wlan/station_acceptance_test.py
 @@ -0,0 +1,288 @@
@@ -8583,7 +8663,7 @@ index 00000000..1fdda2ff
 +    unittest.main(verbosity=2)
 diff --git a/sys/tests/linuxkpi_wlan/station_key_order_test.py b/sys/tests/linuxkpi_wlan/station_key_order_test.py
 new file mode 100644
-index 00000000..a7849491
+index 00000000000..a7849491e9d
 --- /dev/null
 +++ b/sys/tests/linuxkpi_wlan/station_key_order_test.py
 @@ -0,0 +1,106 @@
@@ -8695,7 +8775,7 @@ index 00000000..a7849491
 +    main()
 diff --git a/sys/tests/linuxkpi_wlan/station_m4_token_test.py b/sys/tests/linuxkpi_wlan/station_m4_token_test.py
 new file mode 100644
-index 00000000..decf8728
+index 00000000000..decf8728fa3
 --- /dev/null
 +++ b/sys/tests/linuxkpi_wlan/station_m4_token_test.py
 @@ -0,0 +1,151 @@
@@ -8852,7 +8932,7 @@ index 00000000..decf8728
 +    main()
 diff --git a/sys/tests/linuxkpi_wlan/station_port_test.c b/sys/tests/linuxkpi_wlan/station_port_test.c
 new file mode 100644
-index 00000000..76c83f54
+index 00000000000..76c83f544db
 --- /dev/null
 +++ b/sys/tests/linuxkpi_wlan/station_port_test.c
 @@ -0,0 +1,212 @@
@@ -9070,7 +9150,7 @@ index 00000000..76c83f54
 +#endif
 diff --git a/sys/tests/linuxkpi_wlan/station_port_worker_test.py b/sys/tests/linuxkpi_wlan/station_port_worker_test.py
 new file mode 100644
-index 00000000..ae255db4
+index 00000000000..ae255db47fa
 --- /dev/null
 +++ b/sys/tests/linuxkpi_wlan/station_port_worker_test.py
 @@ -0,0 +1,180 @@
@@ -9256,7 +9336,7 @@ index 00000000..ae255db4
 +    main()
 diff --git a/sys/tests/linuxkpi_wlan/station_tx_descriptor_test.py b/sys/tests/linuxkpi_wlan/station_tx_descriptor_test.py
 new file mode 100644
-index 00000000..57009478
+index 00000000000..570094784d9
 --- /dev/null
 +++ b/sys/tests/linuxkpi_wlan/station_tx_descriptor_test.py
 @@ -0,0 +1,109 @@
@@ -9371,7 +9451,7 @@ index 00000000..57009478
 +    main()
 diff --git a/sys/tests/linuxkpi_wlan/station_tx_lock_test.py b/sys/tests/linuxkpi_wlan/station_tx_lock_test.py
 new file mode 100644
-index 00000000..60114f84
+index 00000000000..60114f84bca
 --- /dev/null
 +++ b/sys/tests/linuxkpi_wlan/station_tx_lock_test.py
 @@ -0,0 +1,184 @@
@@ -9559,9 +9639,291 @@ index 00000000..60114f84
 +
 +if __name__ == "__main__":
 +    main()
+diff --git a/sys/tests/linuxkpi_wlan/wcn7850_tables.c b/sys/tests/linuxkpi_wlan/wcn7850_tables.c
+new file mode 100644
+index 00000000000..7751abe939f
+--- /dev/null
++++ b/sys/tests/linuxkpi_wlan/wcn7850_tables.c
+@@ -0,0 +1,276 @@
++/* SPDX-License-Identifier: BSD-3-Clause-Clear */
++/*
++ * Copyright (c) 2018-2021 The Linux Foundation. All rights reserved.
++ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
++ */
++/*
++ * WCN7850 target CE configuration and register table for the bring-up
++ * test harness.  Copied from wifi7/ce.c and wifi7/hal_wcn7850.c; keep in
++ * sync with those files.
++ */
++#include "core.h"
++#include "ce.h"
++#include "wifi7/hal_wcn7850.h"
++const struct ce_pipe_config ath12k_wifi7_target_ce_config_wlan_wcn7850[] = {
++	/* CE0: host->target HTC control and raw streams */
++	{
++		.pipenum = __cpu_to_le32(0),
++		.pipedir = __cpu_to_le32(PIPEDIR_OUT),
++		.nentries = __cpu_to_le32(32),
++		.nbytes_max = __cpu_to_le32(2048),
++		.flags = __cpu_to_le32(CE_ATTR_FLAGS),
++		.reserved = __cpu_to_le32(0),
++	},
++
++	/* CE1: target->host HTT + HTC control */
++	{
++		.pipenum = __cpu_to_le32(1),
++		.pipedir = __cpu_to_le32(PIPEDIR_IN),
++		.nentries = __cpu_to_le32(32),
++		.nbytes_max = __cpu_to_le32(2048),
++		.flags = __cpu_to_le32(CE_ATTR_FLAGS),
++		.reserved = __cpu_to_le32(0),
++	},
++
++	/* CE2: target->host WMI */
++	{
++		.pipenum = __cpu_to_le32(2),
++		.pipedir = __cpu_to_le32(PIPEDIR_IN),
++		.nentries = __cpu_to_le32(32),
++		.nbytes_max = __cpu_to_le32(2048),
++		.flags = __cpu_to_le32(CE_ATTR_FLAGS),
++		.reserved = __cpu_to_le32(0),
++	},
++
++	/* CE3: host->target WMI */
++	{
++		.pipenum = __cpu_to_le32(3),
++		.pipedir = __cpu_to_le32(PIPEDIR_OUT),
++		.nentries = __cpu_to_le32(32),
++		.nbytes_max = __cpu_to_le32(2048),
++		.flags = __cpu_to_le32(CE_ATTR_FLAGS),
++		.reserved = __cpu_to_le32(0),
++	},
++
++	/* CE4: host->target HTT */
++	{
++		.pipenum = __cpu_to_le32(4),
++		.pipedir = __cpu_to_le32(PIPEDIR_OUT),
++		.nentries = __cpu_to_le32(256),
++		.nbytes_max = __cpu_to_le32(256),
++		.flags = __cpu_to_le32(CE_ATTR_FLAGS | CE_ATTR_DIS_INTR),
++		.reserved = __cpu_to_le32(0),
++	},
++
++	/* CE5: target->host Pktlog */
++	{
++		.pipenum = __cpu_to_le32(5),
++		.pipedir = __cpu_to_le32(PIPEDIR_IN),
++		.nentries = __cpu_to_le32(32),
++		.nbytes_max = __cpu_to_le32(2048),
++		.flags = __cpu_to_le32(CE_ATTR_FLAGS),
++		.reserved = __cpu_to_le32(0),
++	},
++
++	/* CE6: Reserved for target autonomous hif_memcpy */
++	{
++		.pipenum = __cpu_to_le32(6),
++		.pipedir = __cpu_to_le32(PIPEDIR_INOUT),
++		.nentries = __cpu_to_le32(32),
++		.nbytes_max = __cpu_to_le32(16384),
++		.flags = __cpu_to_le32(CE_ATTR_FLAGS),
++		.reserved = __cpu_to_le32(0),
++	},
++
++	/* CE7 used only by Host */
++	{
++		.pipenum = __cpu_to_le32(7),
++		.pipedir = __cpu_to_le32(PIPEDIR_INOUT_H2H),
++		.nentries = __cpu_to_le32(0),
++		.nbytes_max = __cpu_to_le32(0),
++		.flags = __cpu_to_le32(CE_ATTR_FLAGS | CE_ATTR_DIS_INTR),
++		.reserved = __cpu_to_le32(0),
++	},
++
++	/* CE8 target->host used only by IPA */
++	{
++		.pipenum = __cpu_to_le32(8),
++		.pipedir = __cpu_to_le32(PIPEDIR_INOUT),
++		.nentries = __cpu_to_le32(32),
++		.nbytes_max = __cpu_to_le32(16384),
++		.flags = __cpu_to_le32(CE_ATTR_FLAGS),
++		.reserved = __cpu_to_le32(0),
++	},
++	/* CE 9, 10, 11 are used by MHI driver */
++};
++
++const struct service_to_pipe
++ath12k_wifi7_target_service_to_ce_map_wlan_wcn7850[] = {
++	{
++		__cpu_to_le32(ATH12K_HTC_SVC_ID_WMI_DATA_VO),
++		__cpu_to_le32(PIPEDIR_OUT),
++		__cpu_to_le32(3),
++	},
++	{
++		__cpu_to_le32(ATH12K_HTC_SVC_ID_WMI_DATA_VO),
++		__cpu_to_le32(PIPEDIR_IN),
++		__cpu_to_le32(2),
++	},
++	{
++		__cpu_to_le32(ATH12K_HTC_SVC_ID_WMI_DATA_BK),
++		__cpu_to_le32(PIPEDIR_OUT),
++		__cpu_to_le32(3),
++	},
++	{
++		__cpu_to_le32(ATH12K_HTC_SVC_ID_WMI_DATA_BK),
++		__cpu_to_le32(PIPEDIR_IN),
++		__cpu_to_le32(2),
++	},
++	{
++		__cpu_to_le32(ATH12K_HTC_SVC_ID_WMI_DATA_BE),
++		__cpu_to_le32(PIPEDIR_OUT),
++		__cpu_to_le32(3),
++	},
++	{
++		__cpu_to_le32(ATH12K_HTC_SVC_ID_WMI_DATA_BE),
++		__cpu_to_le32(PIPEDIR_IN),
++		__cpu_to_le32(2),
++	},
++	{
++		__cpu_to_le32(ATH12K_HTC_SVC_ID_WMI_DATA_VI),
++		__cpu_to_le32(PIPEDIR_OUT),
++		__cpu_to_le32(3),
++	},
++	{
++		__cpu_to_le32(ATH12K_HTC_SVC_ID_WMI_DATA_VI),
++		__cpu_to_le32(PIPEDIR_IN),
++		__cpu_to_le32(2),
++	},
++	{
++		__cpu_to_le32(ATH12K_HTC_SVC_ID_WMI_CONTROL),
++		__cpu_to_le32(PIPEDIR_OUT),
++		__cpu_to_le32(3),
++	},
++	{
++		__cpu_to_le32(ATH12K_HTC_SVC_ID_WMI_CONTROL),
++		__cpu_to_le32(PIPEDIR_IN),
++		__cpu_to_le32(2),
++	},
++	{
++		__cpu_to_le32(ATH12K_HTC_SVC_ID_RSVD_CTRL),
++		__cpu_to_le32(PIPEDIR_OUT),
++		__cpu_to_le32(0),
++	},
++	{
++		__cpu_to_le32(ATH12K_HTC_SVC_ID_RSVD_CTRL),
++		__cpu_to_le32(PIPEDIR_IN),
++		__cpu_to_le32(2),
++	},
++	{
++		__cpu_to_le32(ATH12K_HTC_SVC_ID_HTT_DATA_MSG),
++		__cpu_to_le32(PIPEDIR_OUT),
++		__cpu_to_le32(4),
++	},
++	{
++		__cpu_to_le32(ATH12K_HTC_SVC_ID_HTT_DATA_MSG),
++		__cpu_to_le32(PIPEDIR_IN),
++		__cpu_to_le32(1),
++	},
++
++	/* (Additions here) */
++
++	{ /* must be last */
++		__cpu_to_le32(0),
++		__cpu_to_le32(0),
++		__cpu_to_le32(0),
++	},
++};
++
++const struct ath12k_hw_regs wcn7850_regs = {
++	/* SW2TCL(x) R0 ring configuration address */
++	.tcl1_ring_id = 0x00000908,
++	.tcl1_ring_misc = 0x00000910,
++	.tcl1_ring_tp_addr_lsb = 0x0000091c,
++	.tcl1_ring_tp_addr_msb = 0x00000920,
++	.tcl1_ring_consumer_int_setup_ix0 = 0x00000930,
++	.tcl1_ring_consumer_int_setup_ix1 = 0x00000934,
++	.tcl1_ring_msi1_base_lsb = 0x00000948,
++	.tcl1_ring_msi1_base_msb = 0x0000094c,
++	.tcl1_ring_msi1_data = 0x00000950,
++	.tcl_ring_base_lsb = 0x00000b58,
++	.tcl1_ring_base_lsb = 0x00000900,
++	.tcl1_ring_base_msb = 0x00000904,
++	.tcl2_ring_base_lsb = 0x00000978,
++
++	/* TCL STATUS ring address */
++	.tcl_status_ring_base_lsb = 0x00000d38,
++
++	.wbm_idle_ring_base_lsb = 0x00000d3c,
++	.wbm_idle_ring_misc_addr = 0x00000d4c,
++	.wbm_r0_idle_list_cntl_addr = 0x00000240,
++	.wbm_r0_idle_list_size_addr = 0x00000244,
++	.wbm_scattered_ring_base_lsb = 0x00000250,
++	.wbm_scattered_ring_base_msb = 0x00000254,
++	.wbm_scattered_desc_head_info_ix0 = 0x00000260,
++	.wbm_scattered_desc_head_info_ix1 = 0x00000264,
++	.wbm_scattered_desc_tail_info_ix0 = 0x00000270,
++	.wbm_scattered_desc_tail_info_ix1 = 0x00000274,
++	.wbm_scattered_desc_ptr_hp_addr = 0x00000027c,
++
++	.wbm_sw_release_ring_base_lsb = 0x0000037c,
++	.wbm_sw1_release_ring_base_lsb = 0x00000284,
++	.wbm0_release_ring_base_lsb = 0x00000e08,
++	.wbm1_release_ring_base_lsb = 0x00000e80,
++
++	/* PCIe base address */
++	.pcie_qserdes_sysclk_en_sel = 0x01e0e0a8,
++	.pcie_pcs_osc_dtct_config_base = 0x01e0f45c,
++
++	/* PPE release ring address */
++	.ppe_rel_ring_base = 0x0000043c,
++
++	/* REO DEST ring address */
++	.reo2_ring_base = 0x0000055c,
++	.reo1_misc_ctrl_addr = 0x00000b7c,
++	.reo1_sw_cookie_cfg0 = 0x00000050,
++	.reo1_sw_cookie_cfg1 = 0x00000054,
++	.reo1_qdesc_lut_base0 = 0x00000058,
++	.reo1_qdesc_lut_base1 = 0x0000005c,
++	.reo1_ring_base_lsb = 0x000004e4,
++	.reo1_ring_base_msb = 0x000004e8,
++	.reo1_ring_id = 0x000004ec,
++	.reo1_ring_misc = 0x000004f4,
++	.reo1_ring_hp_addr_lsb = 0x000004f8,
++	.reo1_ring_hp_addr_msb = 0x000004fc,
++	.reo1_ring_producer_int_setup = 0x00000508,
++	.reo1_ring_msi1_base_lsb = 0x0000052C,
++	.reo1_ring_msi1_base_msb = 0x00000530,
++	.reo1_ring_msi1_data = 0x00000534,
++	.reo1_aging_thres_ix0 = 0x00000b08,
++	.reo1_aging_thres_ix1 = 0x00000b0c,
++	.reo1_aging_thres_ix2 = 0x00000b10,
++	.reo1_aging_thres_ix3 = 0x00000b14,
++
++	/* REO Exception ring address */
++	.reo2_sw0_ring_base = 0x000008a4,
++
++	/* REO Reinject ring address */
++	.sw2reo_ring_base = 0x00000304,
++	.sw2reo1_ring_base = 0x0000037c,
++
++	/* REO cmd ring address */
++	.reo_cmd_ring_base = 0x0000028c,
++
++	/* REO status ring address */
++	.reo_status_ring_base = 0x00000a84,
++
++	/* CE base address */
++	.umac_ce0_src_reg_base = 0x01b80000,
++	.umac_ce0_dest_reg_base = 0x01b81000,
++	.umac_ce1_src_reg_base = 0x01b82000,
++	.umac_ce1_dest_reg_base = 0x01b83000,
++
++	.gcc_gcc_pcie_hot_rst = 0x1e40304,
++
++	.qrtr_node_id = 0x1e03164,
++};
 diff --git a/sys/tests/linuxkpi_wlan/wmi_protocol_test.c b/sys/tests/linuxkpi_wlan/wmi_protocol_test.c
 new file mode 100644
-index 00000000..29f1d679
+index 00000000000..29f1d679635
 --- /dev/null
 +++ b/sys/tests/linuxkpi_wlan/wmi_protocol_test.c
 @@ -0,0 +1,164 @@

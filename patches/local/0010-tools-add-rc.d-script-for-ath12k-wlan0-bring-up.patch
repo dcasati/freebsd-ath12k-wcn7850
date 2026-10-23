@@ -1,23 +1,27 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 25ef1bc1223d5b6e97132374ab8cf8e34018b62a Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 20:57:22 -0600
-Subject: [PATCH 12/14] tools: add rc.d script for ath12k wlan0 bring-up
+Subject: [PATCH 10/10] tools: add rc.d script for ath12k wlan0 bring-up
 
 rc.conf's wlans_<parent> parser rejects ath12k_wifi70, so create
-wlan0, run wpa_supplicant and dhclient from a dedicated rc script.
+wlan0 and run wpa_supplicant and dhclient from a dedicated rc script.
+Firmware kld collisions at load time are not treated as fatal.
+
+Local workaround only; the real fix belongs in the rc.d network
+scripts.
 
 Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
 ---
- tools/tools/ath12k/ath12k_wlan.rc | 97 +++++++++++++++++++++++++++++++
- 1 file changed, 97 insertions(+)
+ tools/tools/ath12k/ath12k_wlan.rc | 99 +++++++++++++++++++++++++++++++
+ 1 file changed, 99 insertions(+)
  create mode 100755 tools/tools/ath12k/ath12k_wlan.rc
 
 diff --git a/tools/tools/ath12k/ath12k_wlan.rc b/tools/tools/ath12k/ath12k_wlan.rc
 new file mode 100755
-index 00000000..e6fdd96a
+index 00000000000..d03ee5e59aa
 --- /dev/null
 +++ b/tools/tools/ath12k/ath12k_wlan.rc
-@@ -0,0 +1,97 @@
+@@ -0,0 +1,99 @@
 +#!/bin/sh
 +#
 +# PROVIDE: ath12k_wlan
@@ -67,7 +71,9 @@ index 00000000..e6fdd96a
 +		return 1
 +		;;
 +	esac
-+	kldload -n ath12k_wcn7850_fw if_ath12k || return 1
++	# Firmware is fetched by the driver from /boot/firmware; the fw kld
++	# can collide with it (EEXIST), so it must not be fatal.
++	kldload -n if_ath12k || return 1
 +	i=0
 +	while ! sysctl -n net.wlan.devices | grep -qw "${parent}"; do
 +		i=$((i + 1))

@@ -1,0 +1,30 @@
+From 169791f86189c1bbf547a840faca0c61471d3927 Mon Sep 17 00:00:00 2001
+From: dcasati <dcasati@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 15:00:37 -0600
+Subject: [PATCH 1/7] ath12k: fix wifi7/hal.c path in module Makefile
+
+SRCS referenced wifif/hal.c, which does not exist.  The module is not
+yet connected to sys/modules/Makefile, so this went unnoticed; fix the
+path so the module can be built once the remaining support is in place.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+---
+ sys/modules/ath12k/Makefile | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/sys/modules/ath12k/Makefile b/sys/modules/ath12k/Makefile
+index 071bb88a8b3..067d1d2d200 100644
+--- a/sys/modules/ath12k/Makefile
++++ b/sys/modules/ath12k/Makefile
+@@ -23,7 +23,7 @@ SRCS+=	dp_htt.c dp_peer.c
+ 
+ SRCS+=	wifi7/ce.c wifi7/core.c
+ SRCS+=	wifi7/dp.c wifi7/dp_mon.c wifi7/dp_rx.c wifi7/dp_tx.c
+-SRCS+=	wifif/hal.c wifi7/hal_tx.c wifi7/hal_rx.c
++SRCS+=	wifi7/hal.c wifi7/hal_tx.c wifi7/hal_rx.c
+ SRCS+=	wifi7/hal_qcc2072.c wifi7/hal_qcn9274.c wifi7/hal_wcn7850.c
+ SRCS+=	wifi7/hw.c wifi7/wmi.c
+ 
+-- 
+2.56.0
+

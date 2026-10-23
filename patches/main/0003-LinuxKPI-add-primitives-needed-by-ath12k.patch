@@ -1,0 +1,920 @@
+From c5553fca5e018acca78e373f71cf789c342d3558 Mon Sep 17 00:00:00 2001
+From: dcasati <dcasati@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 14:44:30 -0600
+Subject: [PATCH 3/7] LinuxKPI: add primitives needed by ath12k
+
+Add rhashtable, plus RCU, tasklet and skbuff extensions, and small
+additions to the barrier, interrupt, list, pci, pm, slab, socket and
+spinlock headers.  These are needed to build ath12k and are otherwise
+self-contained.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+---
+ .../linuxkpi/common/include/asm/barrier.h     |   4 +
+ .../linuxkpi/common/include/linux/interrupt.h |   6 +
+ .../linuxkpi/common/include/linux/list.h      |  10 +
+ .../linuxkpi/common/include/linux/pci.h       |   2 +-
+ sys/compat/linuxkpi/common/include/linux/pm.h |   9 +
+ .../linuxkpi/common/include/linux/rcupdate.h  |   5 +
+ .../common/include/linux/rhashtable.h         | 136 +++++++-
+ .../linuxkpi/common/include/linux/skbuff.h    |  45 ++-
+ .../linuxkpi/common/include/linux/slab.h      |   2 +-
+ .../linuxkpi/common/include/linux/socket.h    |   5 +-
+ .../linuxkpi/common/include/linux/spinlock.h  |   5 +
+ sys/compat/linuxkpi/common/src/linux_rcu.c    |   2 +-
+ sys/compat/linuxkpi/common/src/linux_skbuff.c | 327 ++++++++++++------
+ .../linuxkpi/common/src/linux_tasklet.c       |   4 +-
+ 14 files changed, 431 insertions(+), 131 deletions(-)
+
+diff --git a/sys/compat/linuxkpi/common/include/asm/barrier.h b/sys/compat/linuxkpi/common/include/asm/barrier.h
+index 39c5139cb32..bd0150d69ad 100644
+--- a/sys/compat/linuxkpi/common/include/asm/barrier.h
++++ b/sys/compat/linuxkpi/common/include/asm/barrier.h
+@@ -34,6 +34,10 @@
+ #include <asm/atomic.h>
+ #include <linux/compiler.h>
+ 
++#define	dma_mb()	mb()
++#define	dma_wmb()	wmb()
++#define	dma_rmb()	rmb()
++
+ /* TODO: Check other archs for atomic_thread_fence_* useability */
+ #if defined(__amd64__) || defined(__i386__)
+ #define	smp_mb()	atomic_thread_fence_seq_cst()
+diff --git a/sys/compat/linuxkpi/common/include/linux/interrupt.h b/sys/compat/linuxkpi/common/include/linux/interrupt.h
+index 4dd88c217c5..8d112508ba6 100644
+--- a/sys/compat/linuxkpi/common/include/linux/interrupt.h
++++ b/sys/compat/linuxkpi/common/include/linux/interrupt.h
+@@ -140,6 +140,12 @@ irq_set_affinity_hint(int vector, const cpumask_t *mask)
+ 	return (-error);
+ }
+ 
++static inline int
++irq_set_affinity_and_hint(int vector, const cpumask_t *mask)
++{
++	return (irq_set_affinity_hint(vector, mask));
++}
++
+ struct msi_desc *lkpi_pci_msi_desc_alloc(unsigned int);
+ static inline struct msi_desc *
+ irq_get_msi_desc(unsigned int irq)
+diff --git a/sys/compat/linuxkpi/common/include/linux/list.h b/sys/compat/linuxkpi/common/include/linux/list.h
+index a6c74a324da..71cca41679f 100644
+--- a/sys/compat/linuxkpi/common/include/linux/list.h
++++ b/sys/compat/linuxkpi/common/include/linux/list.h
+@@ -461,6 +461,16 @@ static inline void list_cut_position(struct list_head *list,
+ 		__list_cut_position(list, head, entry);
+ }
+ 
++static inline void
++list_cut_before(struct list_head *list, struct list_head *head,
++    struct list_head *entry)
++{
++	if (head->next == entry)
++		INIT_LIST_HEAD(list);
++	else
++		__list_cut_position(list, head, entry->prev);
++}
++
+ static inline int list_is_first(const struct list_head *list,
+ 				const struct list_head *head)
+ {
+diff --git a/sys/compat/linuxkpi/common/include/linux/pci.h b/sys/compat/linuxkpi/common/include/linux/pci.h
+index a68fd6b1325..0f2f4adaf80 100644
+--- a/sys/compat/linuxkpi/common/include/linux/pci.h
++++ b/sys/compat/linuxkpi/common/include/linux/pci.h
+@@ -268,7 +268,7 @@ struct pci_dev;
+ 
+ struct pci_driver {
+ 	struct list_head		node;
+-	char				*name;
++	const char			*name;
+ 	const struct pci_device_id		*id_table;
+ 	int  (*probe)(struct pci_dev *dev, const struct pci_device_id *id);
+ 	void (*remove)(struct pci_dev *dev);
+diff --git a/sys/compat/linuxkpi/common/include/linux/pm.h b/sys/compat/linuxkpi/common/include/linux/pm.h
+index baf1c152a31..78334ce18ef 100644
+--- a/sys/compat/linuxkpi/common/include/linux/pm.h
++++ b/sys/compat/linuxkpi/common/include/linux/pm.h
+@@ -79,7 +79,16 @@ const struct dev_pm_ops _name = {				\
+ 
+ #define	SET_SYSTEM_SLEEP_PM_OPS(_suspendfunc, _resumefunc)	\
+ 	__SET_PM_OPS(_suspendfunc, _resumefunc)
++#define	SET_LATE_SYSTEM_SLEEP_PM_OPS(_suspendfunc, _resumefunc)	\
++	.suspend_late	= _suspendfunc,				\
++	.resume_early	= _resumefunc,				\
++	.freeze_late	= _suspendfunc,				\
++	.thaw_early	= _resumefunc,				\
++	.poweroff_late	= _suspendfunc,				\
++	.restore_early	= _resumefunc,
+ #else
++#define	SET_SYSTEM_SLEEP_PM_OPS(_suspendfunc, _resumefunc)
++#define	SET_LATE_SYSTEM_SLEEP_PM_OPS(_suspendfunc, _resumefunc)
+ #define	SIMPLE_DEV_PM_OPS(_name, _suspendfunc, _resumefunc)	\
+ const struct dev_pm_ops _name = {				\
+ }
+diff --git a/sys/compat/linuxkpi/common/include/linux/rcupdate.h b/sys/compat/linuxkpi/common/include/linux/rcupdate.h
+index 4aceb7296cd..c1e644c970e 100644
+--- a/sys/compat/linuxkpi/common/include/linux/rcupdate.h
++++ b/sys/compat/linuxkpi/common/include/linux/rcupdate.h
+@@ -45,6 +45,8 @@ extern int linuxkpi_rcu_debug;
+ 		WARN_ONCE((c), ##__VA_ARGS__);				\
+ } while(0)
+ 
++#define	RCU_LOCKDEP_WARN(c, s)	RCU_WARN_ONCE((c), "%s\n", (s))
++
+ #define	LINUX_KFREE_RCU_OFFSET_MAX	4096	/* exclusive */
+ 
+ /* BSD specific defines */
+@@ -78,6 +80,9 @@ extern int linuxkpi_rcu_debug;
+ #define	rcu_read_lock_held(void)					\
+ 	linux_rcu_read_lock_held(RCU_TYPE_REGULAR)
+ 
++/* LinuxKPI implements the regular RCU read-side domain. */
++#define	rcu_read_lock_any_held()	rcu_read_lock_held()
++
+ #define	synchronize_rcu(void) do {	\
+ 	linux_synchronize_rcu(RCU_TYPE_REGULAR);	\
+ } while (0)
+diff --git a/sys/compat/linuxkpi/common/include/linux/rhashtable.h b/sys/compat/linuxkpi/common/include/linux/rhashtable.h
+index c6958b6ee5f..56b4cea0132 100644
+--- a/sys/compat/linuxkpi/common/include/linux/rhashtable.h
++++ b/sys/compat/linuxkpi/common/include/linux/rhashtable.h
+@@ -26,9 +26,15 @@
+ #ifndef	_LINUXKPI_LINUX_RHASHTABLE_H
+ #define	_LINUXKPI_LINUX_RHASHTABLE_H
+ 
+-#include <linux/kernel.h>	/* pr_debug */
++#include <sys/hash.h>
++
++#include <linux/err.h>
++#include <linux/errno.h>
++#include <linux/slab.h>
++#include <linux/spinlock.h>
+ 
+ struct rhash_head {
++	struct rhash_head *next;
+ };
+ 
+ struct rhashtable_params {
+@@ -40,48 +46,158 @@ struct rhashtable_params {
+ };
+ 
+ struct rhashtable {
++	struct rhash_head **buckets;
++	unsigned int nbuckets;
++	spinlock_t lock;
+ };
+ 
++/*
++ * Fixed-bucket implementation for inline, fixed-length keys.  nelem_hint
++ * selects the bucket count (one if unspecified); collisions form unbounded
++ * chains.  automatic_shrinking is accepted as a tuning hint, not implemented.
++ * There is no resizing, element limit, or allocation during insert/remove.
++ *
++ * The table lock serializes ALL chain access, including lookups; these are
++ * not lockless RCU lookups.  A returned object is not reference counted.
++ * Callers must protect its subsequent use with their own exclusion against
++ * removal/free, or hold an outer RCU read section and defer freeing removed
++ * objects with call_rcu()/synchronize_rcu().  The table never frees objects.
++ * Keys must remain unchanged while linked, and a head belongs to one table.
++ * Fast operations must use the same key/head layout passed to init.
++ *
++ * Init/destroy require exclusive ownership of the table.  Destroy requires
++ * callers to have quiesced all operations; it does not wait for readers of
++ * returned objects or drain callbacks.
++ */
+ static inline int
+ rhashtable_init(struct rhashtable *rht,
+     const struct rhashtable_params *params)
+ {
+ 
+-	pr_debug("%s: TODO\n", __func__);
+-	return (-1);
++	rht->buckets = NULL;
++	rht->nbuckets = 0;
++	if (params->key_len == 0)
++		return (-EINVAL);
++
++	rht->nbuckets = params->nelem_hint != 0 ? params->nelem_hint : 1;
++	rht->buckets = kcalloc(rht->nbuckets, sizeof(*rht->buckets),
++	    GFP_KERNEL);
++	if (rht->buckets == NULL) {
++		rht->nbuckets = 0;
++		return (-ENOMEM);
++	}
++	spin_lock_init(&rht->lock);
++	return (0);
+ }
+ 
+ static inline void
+ rhashtable_destroy(struct rhashtable *rht)
+ {
+-	pr_debug("%s: TODO\n", __func__);
++
++	if (rht->buckets == NULL)
++		return;
++	kfree(rht->buckets);
++	rht->buckets = NULL;
++	rht->nbuckets = 0;
++	spin_lock_destroy(&rht->lock);
+ }
+ 
+ static inline void *
+-rhashtable_lookup_fast(struct rhashtable *rht, const void *key,
++lkpi_rhashtable_object(struct rhash_head *head,
+     const struct rhashtable_params params)
+ {
+ 
+-	pr_debug("%s: TODO\n", __func__);
++	return ((char *)head - params.head_offset);
++}
++
++static inline unsigned int
++lkpi_rhashtable_bucket(struct rhashtable *rht, const void *key,
++    const struct rhashtable_params params)
++{
++
++	return (hash32_buf(key, params.key_len, HASHINIT) % rht->nbuckets);
++}
++
++/* Caller holds the table lock. */
++static inline void *
++lkpi_rhashtable_lookup(struct rhashtable *rht, const void *key,
++    unsigned int bucket, const struct rhashtable_params params)
++{
++	struct rhash_head *head;
++	void *object;
++
++	for (head = rht->buckets[bucket]; head != NULL; head = head->next) {
++		object = lkpi_rhashtable_object(head, params);
++		if (memcmp((char *)object + params.key_offset, key,
++		    params.key_len) == 0)
++			return (object);
++	}
+ 	return (NULL);
+ }
+ 
++static inline void *
++rhashtable_lookup_fast(struct rhashtable *rht, const void *key,
++    const struct rhashtable_params params)
++{
++	void *object;
++	unsigned int bucket;
++
++	bucket = lkpi_rhashtable_bucket(rht, key, params);
++	spin_lock(&rht->lock);
++	object = lkpi_rhashtable_lookup(rht, key, bucket, params);
++	spin_unlock(&rht->lock);
++	return (object);
++}
++
+ static inline void *
+ rhashtable_lookup_get_insert_fast(struct rhashtable *rht,
+     struct rhash_head *obj, const struct rhashtable_params params)
+ {
++	const void *key;
++	void *existing;
++	unsigned int bucket;
+ 
+-	pr_debug("%s: TODO\n", __func__);
+-	return (NULL);
++	key = (char *)lkpi_rhashtable_object(obj, params) + params.key_offset;
++	bucket = lkpi_rhashtable_bucket(rht, key, params);
++	spin_lock(&rht->lock);
++	existing = lkpi_rhashtable_lookup(rht, key, bucket, params);
++	/*
++	 * NULL means inserted; duplicates return the existing object
++	 * unchanged.
++	 */
++	if (existing == NULL) {
++		obj->next = rht->buckets[bucket];
++		rht->buckets[bucket] = obj;
++	}
++	spin_unlock(&rht->lock);
++	return (existing);
+ }
+ 
+ static inline int
+ rhashtable_remove_fast(struct rhashtable *rht,
+     struct rhash_head *obj, const struct rhashtable_params params)
+ {
++	struct rhash_head **link;
++	const void *key;
++	unsigned int bucket;
++	int error;
+ 
+-	pr_debug("%s: TODO\n", __func__);
+-	return (-ENOENT);
++	key = (char *)lkpi_rhashtable_object(obj, params) + params.key_offset;
++	bucket = lkpi_rhashtable_bucket(rht, key, params);
++	error = -ENOENT;
++	spin_lock(&rht->lock);
++	for (link = &rht->buckets[bucket]; *link != NULL;
++	    link = &(*link)->next) {
++		/* A matching key alone must not remove a different object. */
++		if (*link != obj)
++			continue;
++		*link = obj->next;
++		obj->next = NULL;
++		error = 0;
++		break;
++	}
++	spin_unlock(&rht->lock);
++	return (error);
+ }
+ 
+ #endif	/* _LINUXKPI_LINUX_RHASHTABLE_H */
+diff --git a/sys/compat/linuxkpi/common/include/linux/skbuff.h b/sys/compat/linuxkpi/common/include/linux/skbuff.h
+index 77ef47064fa..3715b28d0ca 100644
+--- a/sys/compat/linuxkpi/common/include/linux/skbuff.h
++++ b/sys/compat/linuxkpi/common/include/linux/skbuff.h
+@@ -211,6 +211,7 @@ void linuxkpi_kfree_skb(struct sk_buff *);
+ struct sk_buff *linuxkpi_skb_copy(const struct sk_buff *, gfp_t);
+ 
+ int lkpi___skb_linearize(struct sk_buff *);
++int linuxkpi_skb_cow_data(struct sk_buff *, int, struct sk_buff **);
+ 
+ /* -------------------------------------------------------------------------- */
+ 
+@@ -424,6 +425,20 @@ skb_put(struct sk_buff *skb, size_t len)
+ 	return (__skb_put(skb, len));
+ }
+ 
++static inline uint8_t *
++pskb_put(struct sk_buff *skb, struct sk_buff *tail, int len)
++{
++	uint8_t *p;
++
++	KASSERT(len >= 0, ("%s: negative length %d", __func__, len));
++	p = skb_put(tail, len);
++	if (skb != tail) {
++		skb->len += len;
++		skb->data_len += len;
++	}
++	return (p);
++}
++
+ /* skb_put() + copying data in. */
+ static inline void *
+ skb_put_data(struct sk_buff *skb, const void *buf, size_t len)
+@@ -922,7 +937,7 @@ static inline void *
+ skb_frag_address(const skb_frag_t *frag)
+ {
+ 	SKB_TRACE(frag);
+-	return (page_address(frag->page + frag->offset));
++	return ((uint8_t *)page_address(frag->page) + frag->offset);
+ }
+ 
+ static inline void
+@@ -991,6 +1006,18 @@ skb_linearize(struct sk_buff *skb)
+ 	return (skb_is_nonlinear(skb) ? __skb_linearize(skb) : 0);
+ }
+ 
++/*
++ * This implementation has no separately cloned data area.  The skb itself
++ * must be exclusively owned (-EBUSY otherwise).  Successful COW returns one
++ * linear segment and sets *trailer to skb.  Errors leave skb unchanged and
++ * clear *trailer.
++ */
++static inline int
++skb_cow_data(struct sk_buff *skb, int tailbits, struct sk_buff **trailer)
++{
++	return (linuxkpi_skb_cow_data(skb, tailbits, trailer));
++}
++
+ static inline int
+ pskb_expand_head(struct sk_buff *skb, int x, int len, gfp_t gfp)
+ {
+@@ -1020,7 +1047,21 @@ static inline void
+ skb_copy_header(struct sk_buff *to, const struct sk_buff *from)
+ {
+ 	SKB_TRACE2(to, from);
+-	SKB_TODO();
++	to->csum = from->csum;
++	to->protocol = from->protocol;
++	to->ip_summed = from->ip_summed;
++	memcpy(to->cb, from->cb, sizeof(to->cb));
++	to->priority = from->priority;
++	to->qmap = from->qmap;
++	to->l3hdroff = from->l3hdroff;
++	to->l4hdroff = from->l4hdroff;
++	to->mac_header = from->mac_header;
++	to->mac_len = from->mac_len;
++	to->pkt_type = from->pkt_type;
++	to->dev = from->dev;
++	to->sk = from->sk;
++	to->shinfo->gso_type = from->shinfo->gso_type;
++	to->shinfo->gso_size = from->shinfo->gso_size;
+ }
+ 
+ static inline bool
+diff --git a/sys/compat/linuxkpi/common/include/linux/slab.h b/sys/compat/linuxkpi/common/include/linux/slab.h
+index b529a630308..77690506cd3 100644
+--- a/sys/compat/linuxkpi/common/include/linux/slab.h
++++ b/sys/compat/linuxkpi/common/include/linux/slab.h
+@@ -170,7 +170,7 @@ kmalloc_node(size_t size, gfp_t flags, int node)
+     kmalloc(sizeof(typeof(_p)), default_gfp(__VA_ARGS__))
+ 
+ #define	kmalloc_objs(_p, _n, ...)					\
+-    kmalloc(size_mul((_n) * sizeof(typeof(_p))), default_gfp(__VA_ARGS__))
++    kmalloc(size_mul((_n), sizeof(typeof(_p))), default_gfp(__VA_ARGS__))
+ 
+ static inline void *
+ krealloc(const void *ptr, size_t size, gfp_t flags)
+diff --git a/sys/compat/linuxkpi/common/include/linux/socket.h b/sys/compat/linuxkpi/common/include/linux/socket.h
+index 638ee058c2f..8310adef750 100644
+--- a/sys/compat/linuxkpi/common/include/linux/socket.h
++++ b/sys/compat/linuxkpi/common/include/linux/socket.h
+@@ -30,6 +30,7 @@
+ #define	_LINUXKPI_LINUX_SOCKET_H_
+ 
+ #include <sys/socket.h>
++#include <linux/kernel.h>
+ 
+ #define	AF_QIPCRTR			42
+ 
+@@ -38,8 +39,8 @@ kernel_connect(int sd, struct sockaddr *sa, size_t salen, int flags)
+ {
+ 
+ 	/* kern_connectat()? It is used for sockaddr_qrtr by ath1xk/qmi. */
+-	pr_debug("%s: TODO\n", __func__);
+-	return (-EINVAL);
++	pr_err("%s: kernel socket transport is not implemented\n", __func__);
++	return (-EOPNOTSUPP);
+ }
+ 
+ #ifdef notyet
+diff --git a/sys/compat/linuxkpi/common/include/linux/spinlock.h b/sys/compat/linuxkpi/common/include/linux/spinlock.h
+index a786cbab5e1..752c4d46ac6 100644
+--- a/sys/compat/linuxkpi/common/include/linux/spinlock.h
++++ b/sys/compat/linuxkpi/common/include/linux/spinlock.h
+@@ -203,6 +203,11 @@ typedef struct raw_spinlock {
+ /*
+  * cleanup.h related pre-defined cases.
+  */
++DEFINE_LOCK_GUARD_1(spinlock_bh,
++    spinlock_t,
++    spin_lock_bh(_T->lock),
++    spin_unlock_bh(_T->lock))
++
+ DEFINE_LOCK_GUARD_1(spinlock_irqsave,
+     spinlock_t,
+     spin_lock_irqsave(_T->lock, _T->flags),
+diff --git a/sys/compat/linuxkpi/common/src/linux_rcu.c b/sys/compat/linuxkpi/common/src/linux_rcu.c
+index c0b864d269b..c1d723a8582 100644
+--- a/sys/compat/linuxkpi/common/src/linux_rcu.c
++++ b/sys/compat/linuxkpi/common/src/linux_rcu.c
+@@ -252,7 +252,7 @@ linux_rcu_read_unlock(unsigned type)
+ bool
+ linux_rcu_read_lock_held(unsigned type)
+ {
+-#ifdef INVARINATS
++#ifdef INVARIANTS
+ 	struct linux_epoch_record *record __diagused;
+ 	struct task_struct *ts;
+ 
+diff --git a/sys/compat/linuxkpi/common/src/linux_skbuff.c b/sys/compat/linuxkpi/common/src/linux_skbuff.c
+index 6908101f25a..a70b4c3de0b 100644
+--- a/sys/compat/linuxkpi/common/src/linux_skbuff.c
++++ b/sys/compat/linuxkpi/common/src/linux_skbuff.c
+@@ -97,6 +97,9 @@ linuxkpi_alloc_skb(size_t size, gfp_t gfp)
+ 	void *p;
+ 	size_t len;
+ 
++	if (size > UINT_MAX)
++		return (NULL);
++
+ 	skb = uma_zalloc(skbzone, linux_check_m_flags(gfp) | M_ZERO);
+ 	if (skb == NULL)
+ 		return (NULL);
+@@ -104,6 +107,7 @@ linuxkpi_alloc_skb(size_t size, gfp_t gfp)
+ 	skb->prev = skb->next = skb;
+ 	skb->truesize = size;
+ 	skb->shinfo = (struct skb_shared_info *)(skb + 1);
++	refcount_set(&skb->refcnt, 1);
+ 
+ 	if (size == 0)
+ 		return (skb);
+@@ -142,7 +146,6 @@ linuxkpi_alloc_skb(size_t size, gfp_t gfp)
+ 	skb->head = skb->data = (uint8_t *)p;
+ 	skb_reset_tail_pointer(skb);
+ 	skb->end = skb->head + size;
+-	refcount_set(&skb->refcnt, 1);
+ 
+ 	SKB_TRACE_FMT(skb, "data %p size %zu", (skb) ? skb->data : NULL, size);
+ 	return (skb);
+@@ -154,6 +157,8 @@ linuxkpi_dev_alloc_skb(size_t size, gfp_t gfp)
+ 	struct sk_buff *skb;
+ 	size_t len;
+ 
++	if (size > UINT_MAX - NET_SKB_PAD)
++		return (NULL);
+ 	len = size + NET_SKB_PAD;
+ 	skb = linuxkpi_alloc_skb(len, gfp);
+ 
+@@ -170,7 +175,7 @@ linuxkpi_build_skb(void *data, size_t fragsz)
+ {
+ 	struct sk_buff *skb;
+ 
+-	if (data == NULL || fragsz == 0)
++	if (data == NULL || fragsz == 0 || fragsz > UINT_MAX)
+ 		return (NULL);
+ 
+ 	/* Just allocate a skb without data area. */
+@@ -188,110 +193,245 @@ linuxkpi_build_skb(void *data, size_t fragsz)
+ 	return (skb);
+ }
+ 
+-struct sk_buff *
+-linuxkpi_skb_copy(const struct sk_buff *skb, gfp_t gfp)
+-{
+-	struct sk_buff *new;
+-	struct skb_shared_info *shinfo;
+-	size_t len;
+-	unsigned int headroom;
+-	uint16_t fragno, count;
+-
+-	/* Full buffer size + any fragments. */
+-	len = skb->end - skb->head + skb->data_len;
+-
+-	new = linuxkpi_alloc_skb(len, gfp);
+-	if (new == NULL)
+-		return (NULL);
+-
+-	headroom = skb_headroom(skb);
+-	/* Fixup head and end. */
+-	skb_reserve(new, headroom);	/* data and tail move headroom forward. */
+-	skb_put(new, skb->len);		/* tail and len get adjusted */
++/*
++ * Bound recursion on the kernel stack; deeper trees fail without
++ * modification.
++ */
++#define	LKPI_SKB_MAX_DEPTH	16
+ 
+-	/* Copy data. */
+-	memcpy(new->head, skb->data - headroom, headroom + skb->len);
++/*
++ * A NULL destination validates the complete payload without copying it.
++ * frag_list owns one skb reference per entry in a NULL-terminated chain.
++ */
++static int
++lkpi_skb_copy_data(const struct sk_buff *skb, uint8_t *dst, unsigned int depth)
++{
++	const struct skb_shared_info *shinfo;
++	const struct sk_buff *frag, *slow, *fast;
++	const skb_frag_t *pagefrag;
++	size_t headlen, remaining;
++	unsigned int i;
++	int error;
++
++	if (depth > LKPI_SKB_MAX_DEPTH)
++		return (-ELOOP);
++	if (skb == NULL || skb->shinfo == NULL || skb->data_len > skb->len)
++		return (-EINVAL);
++	headlen = skb->len - skb->data_len;
++	if (skb->head == NULL) {
++		if (skb->data != NULL || skb->tail != NULL ||
++		    skb->end != NULL || headlen != 0)
++			return (-EINVAL);
++	} else if ((uintptr_t)skb->head > (uintptr_t)skb->data ||
++	    (uintptr_t)skb->data > (uintptr_t)skb->tail ||
++	    (uintptr_t)skb->tail > (uintptr_t)skb->end ||
++	    (uintptr_t)skb->end - (uintptr_t)skb->head > UINT_MAX ||
++	    (uintptr_t)skb->tail - (uintptr_t)skb->data != headlen) {
++		return (-EINVAL);
++	}
+ 
+-	/* Deal with fragments. */
+ 	shinfo = skb->shinfo;
+-	for (count = fragno = 0;
+-	    count < shinfo->nr_frags && fragno < nitems(shinfo->frags);
+-	    fragno++) {
+-		if (shinfo->frags[fragno].page != NULL) {
+-			skb_put_data(new,
+-			    skb_frag_address(&shinfo->frags[fragno]),
+-			    shinfo->frags[fragno].size);
+-			count++;
+-		}
++	if (shinfo->nr_frags > nitems(shinfo->frags))
++		return (-EINVAL);
++	slow = fast = shinfo->frag_list;
++	while (fast != NULL && fast->next != NULL) {
++		slow = slow->next;
++		fast = fast->next->next;
++		if (slow == fast)
++			return (-ELOOP);
+ 	}
+ 
+-	/* Deal with header fields. */
+-	memcpy(new->cb, skb->cb, sizeof(skb->cb));
+-	SKB_IMPROVE("more header fields to copy?");
+-
+-	return (new);
++	if (dst != NULL && headlen != 0) {
++		memcpy(dst, skb->data, headlen);
++		dst += headlen;
++	}
++	remaining = skb->data_len;
++	for (i = 0; i < shinfo->nr_frags; i++) {
++		pagefrag = &shinfo->frags[i];
++		if (pagefrag->page == NULL || pagefrag->offset < 0 ||
++		    pagefrag->size > remaining ||
++		    (uintmax_t)pagefrag->offset > SIZE_MAX - pagefrag->size ||
++		    page_address(pagefrag->page) == NULL)
++			return (-EINVAL);
++		if (dst != NULL && pagefrag->size != 0) {
++			memcpy(dst, skb_frag_address(pagefrag), pagefrag->size);
++			dst += pagefrag->size;
++		}
++		remaining -= pagefrag->size;
++	}
++	for (frag = shinfo->frag_list; frag != NULL; frag = frag->next) {
++		if (frag->len > remaining)
++			return (-EINVAL);
++		error = lkpi_skb_copy_data(frag, dst, depth + 1);
++		if (error != 0)
++			return (error);
++		if (dst != NULL)
++			dst += frag->len;
++		remaining -= frag->len;
++	}
++	return (remaining == 0 ? 0 : -EINVAL);
+ }
+ 
+-int
+-lkpi___skb_linearize(struct sk_buff *skb)
++static int
++lkpi_skb_copy_linear(const struct sk_buff *skb, size_t tailbits, gfp_t gfp,
++    struct sk_buff **result)
+ {
+ 	struct sk_buff *new;
+-	struct skb_shared_info *shinfo;
+-	uint16_t fragno, count;
+-
+-	SKB_TRACE(skb);
+-	SKB_IMPROVE("Hack completely re-allocating and freeing; FIXME");
+-	new = skb_copy(skb, GFP_NOWAIT);
++	size_t headroom, tailroom, size;
++	int error;
++
++	error = lkpi_skb_copy_data(skb, NULL, 0);
++	if (error != 0)
++		return (error);
++	headroom = skb->head != NULL ? skb->data - skb->head : 0;
++	tailroom = skb->head != NULL ? skb->end - skb->tail : 0;
++	tailroom = max(tailroom, tailbits);
++	if (headroom > UINT_MAX - skb->len ||
++	    tailroom > UINT_MAX - headroom - skb->len)
++		return (-EOVERFLOW);
++	size = headroom + skb->len + tailroom;
++	new = linuxkpi_alloc_skb(size, gfp);
+ 	if (new == NULL)
+ 		return (-ENOMEM);
++	if (headroom != 0) {
++		skb_reserve(new, headroom);
++		memcpy(new->head, skb->head, headroom);
++	}
++	if (skb->len != 0)
++		skb_put(new, skb->len);
++	error = lkpi_skb_copy_data(skb, new->data, 0);
++	if (error != 0) {
++		linuxkpi_kfree_skb(new);
++		return (error);
++	}
++	/* The independent copy cannot acquire the source's mbuf ownership. */
++	skb_copy_header(new, skb);
++	*result = new;
++	return (0);
++}
+ 
+-	/* Now need to swap head, data, tail, ... and free from old (and then new). */
+-	shinfo = skb->shinfo;
+-	for (count = fragno = 0;
+-	    count < shinfo->nr_frags && fragno < nitems(shinfo->frags);
+-	    fragno++) {
++struct sk_buff *
++linuxkpi_skb_copy(const struct sk_buff *skb, gfp_t gfp)
++{
++	struct sk_buff *new;
+ 
+-		if (shinfo->frags[fragno].page != NULL) {
+-			struct page *p;
++	if (lkpi_skb_copy_linear(skb, 0, gfp, &new) != 0)
++		return (NULL);
++	return (new);
++}
++
++static void
++lkpi_skb_release_data(struct sk_buff *skb)
++{
++	struct skb_shared_info *shinfo;
++	struct sk_buff *frag, *next;
++	struct page *p;
++	unsigned int i;
+ 
+-			p = shinfo->frags[fragno].page;
+-			shinfo->frags[fragno].size = 0;
+-			shinfo->frags[fragno].offset = 0;
+-			shinfo->frags[fragno].page = NULL;
++	shinfo = skb->shinfo;
++	for (i = 0; i < shinfo->nr_frags && i < nitems(shinfo->frags); i++) {
++		p = shinfo->frags[i].page;
++		memset(&shinfo->frags[i], 0, sizeof(shinfo->frags[i]));
++		if (p == NULL)
++			continue;
++#ifdef PAGE_IS_LKPI_PAGE
++		if ((skb->_flags & _SKB_PP_RECYCLE) != 0)
++			page_pool_put_full_page(p->pp, p, false);
++		else
++#endif
+ 			__free_page(p);
+-			count++;
+-		}
+ 	}
+-
+-	if ((skb->_flags & _SKB_FLAGS_SKBEXTFRAG) != 0) {
+-		void *p;
+-
+-		p = skb->head;
+-		skb_free_frag(p);
+-		skb->head = NULL;
+-		skb->_flags &= ~_SKB_FLAGS_SKBEXTFRAG;
++	shinfo->nr_frags = 0;
++	frag = shinfo->frag_list;
++	shinfo->frag_list = NULL;
++	while (frag != NULL) {
++		next = frag->next;
++		/*
++		 * A retained child reference must keep its links and
++		 * payload.
++		 */
++		linuxkpi_kfree_skb(frag);
++		frag = next;
+ 	}
+ 
++	if ((skb->_flags & _SKB_FLAGS_SKBEXTFRAG) != 0)
++		skb_free_frag(skb->head);
++	else {
+ #ifdef	SKB_DMA32_MALLOC
+-	if (__predict_false(linuxkpi_skb_memlimit != 0))
+-		free(skb->head, M_LKPISKB);
+-	else
++		if (__predict_false(linuxkpi_skb_memlimit != 0))
++			free(skb->head, M_LKPISKB);
++		else
+ #endif
+-	kfree(skb->head);
++			kfree(skb->head);
++	}
++	skb->_flags &= ~(_SKB_FLAGS_SKBEXTFRAG | _SKB_PP_RECYCLE);
++}
++
++static void
++lkpi_skb_replace_data(struct sk_buff *skb, struct sk_buff *new)
++{
+ 
++	lkpi_skb_release_data(skb);
+ 	skb->head = new->head;
+ 	skb->data = new->data;
+ 	skb->tail = new->tail;
+ 	skb->end = new->end;
+ 	skb->len = new->len;
+-	skb->data_len = new->data_len;
++	skb->data_len = 0;
+ 	skb->truesize = new->truesize;
+-
+ 	uma_zfree(skbzone, new);
++}
++
++int
++lkpi___skb_linearize(struct sk_buff *skb)
++{
++	struct sk_buff *new;
++	int error;
+ 
++	if (skb == NULL)
++		return (-EINVAL);
++	if (refcount_read(&skb->refcnt) != 1)
++		return (-EBUSY);
++	error = lkpi_skb_copy_linear(skb, 0, GFP_ATOMIC, &new);
++	if (error != 0)
++		return (error);
++	lkpi_skb_replace_data(skb, new);
+ 	return (0);
+ }
+ 
++int
++linuxkpi_skb_cow_data(struct sk_buff *skb, int tailbits,
++    struct sk_buff **trailer)
++{
++	struct sk_buff *new;
++	int error;
++
++	if (trailer == NULL)
++		return (-EINVAL);
++	*trailer = NULL;
++	if (skb == NULL || tailbits < 0)
++		return (-EINVAL);
++	/* skb_get() shares the entire object, not just its backing storage. */
++	if (refcount_read(&skb->refcnt) != 1)
++		return (-EBUSY);
++	error = lkpi_skb_copy_data(skb, NULL, 0);
++	if (error != 0)
++		return (error);
++	if (skb->head != NULL && skb->data_len == 0 &&
++	    skb->shinfo->nr_frags == 0 && skb->shinfo->frag_list == NULL &&
++	    (skb->_flags & _SKB_FLAGS_SKBEXTFRAG) == 0 &&
++	    (size_t)(skb->end - skb->tail) >= (size_t)tailbits) {
++		*trailer = skb;
++		return (1);
++	}
++	error = lkpi_skb_copy_linear(skb, tailbits, GFP_ATOMIC, &new);
++	if (error != 0)
++		return (error);
++	lkpi_skb_replace_data(skb, new);
++	*trailer = skb;
++	return (1);
++}
++
+ static bool
+ lkpi_skb_refcount_release(struct sk_buff *skb)
+ {
+@@ -309,8 +449,6 @@ lkpi_skb_refcount_release(struct sk_buff *skb)
+ void
+ linuxkpi_kfree_skb(struct sk_buff *skb)
+ {
+-	struct skb_shared_info *shinfo;
+-	uint16_t fragno, count;
+ 
+ 	SKB_TRACE(skb);
+ 	if (skb == NULL)
+@@ -339,42 +477,7 @@ linuxkpi_kfree_skb(struct sk_buff *skb)
+ 	KASSERT(skb->m == NULL,
+ 	    ("%s: skb %p m %p != NULL\n", __func__, skb, skb->m));
+ 
+-	shinfo = skb->shinfo;
+-	for (count = fragno = 0;
+-	    count < shinfo->nr_frags && fragno < nitems(shinfo->frags);
+-	    fragno++) {
+-
+-		if (shinfo->frags[fragno].page != NULL) {
+-			struct page *p;
+-
+-			p = shinfo->frags[fragno].page;
+-			shinfo->frags[fragno].size = 0;
+-			shinfo->frags[fragno].offset = 0;
+-			shinfo->frags[fragno].page = NULL;
+-#ifdef PAGE_IS_LKPI_PAGE
+-			if ((skb->_flags & _SKB_PP_RECYCLE) != 0)
+-				page_pool_put_full_page(p->pp, p, false);
+-			else
+-#endif
+-				__free_page(p);
+-			count++;
+-		}
+-	}
+-
+-	if ((skb->_flags & _SKB_FLAGS_SKBEXTFRAG) != 0) {
+-		void *p;
+-
+-		p = skb->head;
+-		skb_free_frag(p);
+-		skb->head = NULL;
+-	}
+-
+-#ifdef	SKB_DMA32_MALLOC
+-	if (__predict_false(linuxkpi_skb_memlimit != 0))
+-		free(skb->head, M_LKPISKB);
+-	else
+-#endif
+-	kfree(skb->head);
++	lkpi_skb_release_data(skb);
+ 	uma_zfree(skbzone, skb);
+ }
+ 
+diff --git a/sys/compat/linuxkpi/common/src/linux_tasklet.c b/sys/compat/linuxkpi/common/src/linux_tasklet.c
+index e443ab3958b..e484cab1dcb 100644
+--- a/sys/compat/linuxkpi/common/src/linux_tasklet.c
++++ b/sys/compat/linuxkpi/common/src/linux_tasklet.c
+@@ -151,7 +151,7 @@ tasklet_init(struct tasklet_struct *ts,
+ 	ts->func = func;
+ 	ts->callback = NULL;
+ 	ts->data = data;
+-	atomic_set_int(&ts->tasklet_state, TASKLET_ST_IDLE);
++	TASKLET_ST_SET(ts, TASKLET_ST_IDLE);
+ 	atomic_set(&ts->count, 0);
+ 	ts->use_callback = false;
+ }
+@@ -164,7 +164,7 @@ tasklet_setup(struct tasklet_struct *ts, tasklet_callback_t *c)
+ 	ts->func = NULL;
+ 	ts->callback = c;
+ 	ts->data = 0;
+-	atomic_set_int(&ts->tasklet_state, TASKLET_ST_IDLE);
++	TASKLET_ST_SET(ts, TASKLET_ST_IDLE);
+ 	atomic_set(&ts->count, 0);
+ 	ts->use_callback = true;
+ }
+-- 
+2.56.0
+
