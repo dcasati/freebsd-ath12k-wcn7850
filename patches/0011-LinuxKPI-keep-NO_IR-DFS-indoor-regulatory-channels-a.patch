@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 20:57:18 -0600
-Subject: [PATCH 5/8] LinuxKPI: keep NO_IR/DFS/indoor regulatory channels as
+Subject: [PATCH 11/14] LinuxKPI: keep NO_IR/DFS/indoor regulatory channels as
  passive
 
 The strict regulatory filter rejected any channel touched by a rule with

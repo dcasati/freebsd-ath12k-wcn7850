@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 20:57:18 -0600
-Subject: [PATCH 4/8] ath12k: apply hw.ath12k.country before boot regd
+Subject: [PATCH 10/14] ath12k: apply hw.ath12k.country before boot regd
  publication
 
 Strict LinuxKPI regulatory mode only accepts a byte-identical regd once

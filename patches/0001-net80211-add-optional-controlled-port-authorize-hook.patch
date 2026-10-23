@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: dcasati <dcasati@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 14:44:29 -0600
+Subject: [PATCH 01/14] net80211: add optional controlled-port authorize hook
+
+Add iv_port_authorize to ieee80211vap.  When set, ieee80211_node_authorize()
+asks the driver before marking the node authorized, and
+ieee80211_node_unauthorize() notifies it on revocation.  For WPA2 the
+link-state UP notification is deferred until the node is authorized, so
+DHCP does not start before the controlled port is open.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+---
+ sys/net80211/ieee80211_freebsd.c | 5 ++++-
+ sys/net80211/ieee80211_node.c    | 5 +++++
+ sys/net80211/ieee80211_var.h     | 2 ++
+ 3 files changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/sys/net80211/ieee80211_freebsd.c b/sys/net80211/ieee80211_freebsd.c
+index fdbea262..486a584f 100644
+--- a/sys/net80211/ieee80211_freebsd.c
++++ b/sys/net80211/ieee80211_freebsd.c
+@@ -839,7 +839,10 @@ ieee80211_notify_node_join(struct ieee80211_node *ni, int newassoc)
+ 	if (ni == vap->iv_bss) {
+ 		notify_macaddr(ifp, newassoc ?
+ 		    RTM_IEEE80211_ASSOC : RTM_IEEE80211_REASSOC, ni->ni_bssid);
+-		if_link_state_change(ifp, LINK_STATE_UP);
++		if (vap->iv_port_authorize == NULL ||
++		    (vap->iv_flags & IEEE80211_F_WPA) != IEEE80211_F_WPA2 ||
++		    ieee80211_node_is_authorized(ni))
++			if_link_state_change(ifp, LINK_STATE_UP);
+ 	} else {
+ 		notify_macaddr(ifp, newassoc ?
+ 		    RTM_IEEE80211_JOIN : RTM_IEEE80211_REJOIN, ni->ni_macaddr);
+diff --git a/sys/net80211/ieee80211_node.c b/sys/net80211/ieee80211_node.c
+index 97026885..791e388b 100644
+--- a/sys/net80211/ieee80211_node.c
++++ b/sys/net80211/ieee80211_node.c
+@@ -233,6 +233,9 @@ ieee80211_node_authorize(struct ieee80211_node *ni)
+ {
+ 	struct ieee80211vap *vap = ni->ni_vap;
+ 
++	if (vap->iv_port_authorize != NULL &&
++	    !vap->iv_port_authorize(ni, true))
++		return;
+ 	ni->ni_flags |= IEEE80211_NODE_AUTH;
+ 	ni->ni_inact_reload = vap->iv_inact_run;
+ 	ni->ni_inact = ni->ni_inact_reload;
+@@ -246,6 +249,8 @@ ieee80211_node_unauthorize(struct ieee80211_node *ni)
+ {
+ 	struct ieee80211vap *vap = ni->ni_vap;
+ 
++	if (vap->iv_port_authorize != NULL)
++		(void)vap->iv_port_authorize(ni, false);
+ 	ni->ni_flags &= ~IEEE80211_NODE_AUTH;
+ 	ni->ni_inact_reload = vap->iv_inact_auth;
+ 	if (ni->ni_inact > ni->ni_inact_reload)
+diff --git a/sys/net80211/ieee80211_var.h b/sys/net80211/ieee80211_var.h
+index 2f11fa7c..d4e27a81 100644
+--- a/sys/net80211/ieee80211_var.h
++++ b/sys/net80211/ieee80211_var.h
+@@ -521,6 +521,8 @@ struct ieee80211vap {
+ 				    const struct ieee80211_key *);
+ 	void			(*iv_key_update_begin)(struct ieee80211vap *);
+ 	void			(*iv_key_update_end)(struct ieee80211vap *);
++	/* Optional non-sleeping controlled-port admission/revocation hook. */
++	bool			(*iv_port_authorize)(struct ieee80211_node *, bool);
+ 	void			(*iv_update_deftxkey)(struct ieee80211vap *,
+ 				    ieee80211_keyix deftxkey);
+ 
+-- 
+2.56.0
+
