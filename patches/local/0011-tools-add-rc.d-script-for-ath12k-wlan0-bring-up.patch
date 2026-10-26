@@ -1,7 +1,7 @@
-From b446eb81b0e7a3c05b666ee527bd87c2751788cb Mon Sep 17 00:00:00 2001
+From 6f75c0fcfb51edad0930127c71244c7a573da620 Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 20:57:22 -0600
-Subject: [PATCH 10/10] tools: add rc.d script for ath12k wlan0 bring-up
+Subject: [PATCH 11/11] tools: add rc.d script for ath12k wlan0 bring-up
 
 rc.conf's wlans_<parent> parser rejects ath12k_wifi70, so create
 wlan0 and run wpa_supplicant and dhclient from a dedicated rc script.

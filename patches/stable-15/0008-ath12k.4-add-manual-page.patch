@@ -1,0 +1,273 @@
+From 3639c8b30871bfafb153a34fe2c0fec30032d6c6 Mon Sep 17 00:00:00 2001
+From: dcasati <dcasati@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 13:01:02 -0600
+Subject: [PATCH 8/8] ath12k.4: add manual page
+
+Document the LinuxKPI-based ath12k driver for the Qualcomm WCN7850:
+loading, firmware files, the ath12k_wifi7N device name, the
+hw.ath12k.country and LinuxKPI module parameter tunables, the tested
+station-mode capabilities and the current limits.  List ath12k in
+linuxkpi_wlan.4.
+
+Like ath10k.4, the page is not yet hooked up in man4/Makefile, as the
+module is not built from sys/modules/Makefile.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+---
+ share/man/man4/ath12k.4        | 214 +++++++++++++++++++++++++++++++++
+ share/man/man4/linuxkpi_wlan.4 |   4 +-
+ 2 files changed, 217 insertions(+), 1 deletion(-)
+ create mode 100644 share/man/man4/ath12k.4
+
+diff --git a/share/man/man4/ath12k.4 b/share/man/man4/ath12k.4
+new file mode 100644
+index 00000000000..18b90323e34
+--- /dev/null
++++ b/share/man/man4/ath12k.4
+@@ -0,0 +1,214 @@
++.\"
++.\" Copyright (c) 2026 dcasati
++.\"
++.\" SPDX-License-Identifier: BSD-2-Clause
++.\"
++.Dd October 26, 2026
++.Dt ATH12K 4
++.Os
++.Sh NAME
++.Nm ath12k
++.Nd Qualcomm IEEE 802.11be wireless network driver
++.Sh SYNOPSIS
++The driver will auto-load without any user interaction using
++.Xr devmatch 8
++if enabled in
++.Xr rc.conf 5 .
++.Pp
++Only if auto-loading is explicitly disabled, place the following
++lines in
++.Xr rc.conf 5
++to manually load the driver as a module at boot time:
++.Bd -literal -offset indent
++kld_list="${kld_list} if_ath12k"
++.Ed
++.Pp
++Alternatively, place the following line in
++.Xr loader.conf 5 :
++.Bd -literal -offset indent
++if_ath12k_load="YES"
++.Ed
++.Sh DESCRIPTION
++The
++.Nm
++driver provides support for Qualcomm WCN7850 based wireless
++network devices.
++.Nm
++is derived from Qualcomm's Linux ath12k driver.
++.Pp
++This driver requires firmware to be loaded before it will work.
++The driver reads the raw firmware images through
++.Xr firmware 9
++from
++.Pa /boot/firmware/ath12k/WCN7850/hw2.0/ .
++Otherwise no
++.Xr wlan 4
++interface can be created using
++.Xr ifconfig 8 .
++The following files are used:
++.Bl -tag -width "firmware-2.bin" -offset indent
++.It Pa amss.bin
++Main firmware image, downloaded over MHI.
++.It Pa m3.bin
++M3 co-processor firmware image.
++.It Pa board-2.bin
++Board data file containing the board-specific calibration data.
++.Pa board.bin
++is used if
++.Pa board-2.bin
++is not present.
++.It Pa firmware-2.bin
++Optional container for the firmware images.
++If present, the
++.Pa amss.bin
++and
++.Pa m3.bin
++images embedded in it are used.
++.It Pa regdb.bin
++Optional regulatory database.
++.El
++.Pp
++The driver uses the
++.Xr linuxkpi_wlan 4
++and
++.Xr linuxkpi 4
++compat framework to bridge between the Linux and
++native
++.Fx
++driver code as well as to the native
++.Xr net80211 4
++wireless stack.
++The MHI bus and the QMI messaging support needed by
++.Nm
++are implemented in
++.Xr linuxkpi 4 .
++.Pp
++The PCI device attaches as
++.Li ath12k_wifi7 Ns Ar N .
++A
++.Xr wlan 4
++interface in station mode is created with:
++.Bd -literal -offset indent
++ifconfig wlan0 create wlandev ath12k_wifi70
++.Ed
++.Pp
++Only station mode is supported.
++WPA2-PSK has been tested using
++.Xr wpa_supplicant 8 .
++The following operation has been tested:
++.Pp
++.Bl -bullet -offset indent -compact
++.It
++2.4 GHz channels at 20 MHz bandwidth.
++.It
++5 GHz channels at 20 MHz, 40 MHz (HT40) and 80 MHz (VHT80) bandwidth.
++.El
++.Pp
++The driver applies strict regulatory rules.
++Channels which the regulatory domain marks as
++.Dq no initiating radiation
++or as requiring DFS are scanned passively only.
++The regulatory country cannot be changed at runtime;
++see
++.Va hw.ath12k.country
++below.
++.Sh HARDWARE
++The
++.Nm
++driver supports PCIe devices with the following chipsets:
++.Pp
++.Bl -bullet -offset indent -compact
++.It
++Qualcomm WCN7850 hw2.0 (PCI ID 0x17cb:0x1107)
++.El
++.Pp
++The driver also matches the Qualcomm QCN9274 and QCC2072 PCI IDs,
++but only WCN7850 has been tested on
++.Fx .
++.Sh LOADER TUNABLES
++Tunables can be set in
++.Xr loader.conf 5
++and are read when the module is loaded.
++.Bl -tag -width indent
++.It Va hw.ath12k.country
++ISO 3166-1 alpha-2 country code, in upper case, for example
++.Ql CA .
++The driver requests this regulatory country from the firmware before
++the boot-time regulatory domain is published.
++If unset or not two upper case letters, the regulatory domain
++reported by the firmware is used.
++The default is unset.
++.It Va compat.linuxkpi.ath12k_core_debug_mask
++Bitmask of driver debug messages to enable.
++This is also a read-write
++.Xr sysctl 8
++variable.
++The default is 0.
++.It Va compat.linuxkpi.ath12k_core_ftm_mode
++Boot the firmware in factory test mode.
++This is not intended for normal operation.
++The default is 0.
++.El
++.Sh SEE ALSO
++.Xr linuxkpi 4 ,
++.Xr linuxkpi_wlan 4 ,
++.Xr net80211 4 ,
++.Xr wlan 4 ,
++.Xr loader.conf 5 ,
++.Xr rc.conf 5 ,
++.Xr networking 7 ,
++.Xr devmatch 8 ,
++.Xr ifconfig 8 ,
++.Xr wpa_supplicant 8 ,
++.Xr firmware 9
++.Sh HISTORY
++.\" XXX Review: confirm the release before committing upstream.
++The
++.Nm
++driver first appeared in
++.Fx 16.0 .
++.Sh CAVEATS
++Do not load the
++.Pa ath12k_wcn7850_fw
++firmware module in addition to the raw firmware images.
++.Xr devmatch 8
++loads
++.Nm
++early and the firmware module then fails with
++.Dq firmware_register: ... already registered .
++.Pp
++Messages such as
++.Dq kldload: ... Unsupported file layout
++at attach time are harmless.
++.Xr firmware 9
++probes each raw firmware image as a kernel module before reading
++the file.
++.Pp
++The
++.Va wlans_ Ns Ar parent
++variable in
++.Xr rc.conf 5
++does not accept parent device names containing an underscore,
++so the
++.Xr wlan 4
++interface for
++.Li ath12k_wifi70
++has to be created explicitly with
++.Xr ifconfig 8 .
++.Sh BUGS
++While
++.Nm
++supports 802.11a/b/g/n/ac/ax/be modes,
++the compatibility code currently only supports 802.11a/b/g/n/ac modes.
++Operation in 802.11ax (HE) and 802.11be (EHT) modes, multi-link operation
++(MLO), 160 MHz channels and the 6 GHz band are not supported.
++.Pp
++Host AP mode is not supported and monitor mode has not been tested.
++.Pp
++Unloading the driver while a
++.Xr wlan 4
++interface is associated can hang the system.
++Destroy the
++.Xr wlan 4
++interface before unloading
++.Nm .
+diff --git a/share/man/man4/linuxkpi_wlan.4 b/share/man/man4/linuxkpi_wlan.4
+index fa0b15b5e0b..d37b262e4cb 100644
+--- a/share/man/man4/linuxkpi_wlan.4
++++ b/share/man/man4/linuxkpi_wlan.4
+@@ -6,7 +6,7 @@
+ .\" This documentation was written by Bj\xc3\xb6rn Zeeb under sponsorship from
+ .\" the FreeBSD Foundation.
+ .\"
+-.Dd May 23, 2026
++.Dd October 26, 2026
+ .Dt LINUXKPI_WLAN 4
+ .Os
+ .Sh NAME
+@@ -66,6 +66,7 @@ support, it was decided not to do so given
+ has been deprecated since 2004.
+ .Pp
+ The list of supported drivers includes
++.Xr ath12k 4 ,
+ .Xr iwlwifi 4 ,
+ .Xr rtw88 4 ,
+ and
+@@ -127,6 +128,7 @@ This sysctl is
+ and normally only needed for debugging purposes.
+ .El
+ .Sh SEE ALSO
++.Xr ath12k 4 ,
+ .Xr iwlwifi 4 ,
+ .Xr linuxkpi 4 ,
+ .Xr rtw88 4 ,
+-- 
+2.56.0
+

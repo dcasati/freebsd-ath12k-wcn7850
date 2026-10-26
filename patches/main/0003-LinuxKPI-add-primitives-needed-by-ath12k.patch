@@ -1,7 +1,7 @@
 From bb772c846255661a3e82045610b65111c7b05204 Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 14:44:30 -0600
-Subject: [PATCH 3/7] LinuxKPI: add primitives needed by ath12k
+Subject: [PATCH 3/8] LinuxKPI: add primitives needed by ath12k
 
 Add rhashtable, plus RCU, tasklet and skbuff extensions, and small
 additions to the barrier, interrupt, list, pci, pm, slab, socket and

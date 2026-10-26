@@ -1,7 +1,7 @@
 From af47bda5cc81ba4426c20f3d97d51d42cf296b77 Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 14:44:31 -0600
-Subject: [PATCH 6/7] ath12k: add WCN7850 support on FreeBSD
+Subject: [PATCH 6/8] ath12k: add WCN7850 support on FreeBSD
 
 Make the WCN7850 (hw2.0, PCI) work through LinuxKPI.  All changes to the
 vendor sources are under #if defined(__FreeBSD__) with the Linux code

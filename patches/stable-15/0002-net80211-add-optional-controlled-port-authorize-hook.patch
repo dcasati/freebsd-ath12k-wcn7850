@@ -1,7 +1,7 @@
 From d9c2484789a56f6c310f0613573e7488a9217b5f Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 14:44:29 -0600
-Subject: [PATCH 2/7] net80211: add optional controlled-port authorize hook
+Subject: [PATCH 2/8] net80211: add optional controlled-port authorize hook
 
 Add an optional iv_port_authorize callback to struct ieee80211vap.
 When set, ieee80211_node_authorize() asks the driver before marking

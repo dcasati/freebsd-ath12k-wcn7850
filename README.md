@@ -6,6 +6,7 @@ Status: station mode with WPA2-PSK works on 2.4 GHz (20 MHz) and 5 GHz (HT40/VHT
 
 - 30-minute soak: 1800/1800 pings, 0% loss.
 - 20/20 disconnect/reconnect cycles passed.
+- 10/10 driver unload/reload cycles passed (service stopped first). Unloading while associated hangs the host; see BUGS in ath12k(4).
 - iperf3 download: about 280 Mb/s over TCP. UDP at 200 and 300 Mb/s: under 0.5% loss.
 - The in-kernel regulatory test and the regulatory model test pass.
 
@@ -15,12 +16,12 @@ QMI is implemented in LinuxKPI (`linux_qmi*.c`), and ath12k uses the stock `qmi_
 
 | Path | Contents |
 |------|----------|
-| `patches/stable-15/0001-0007` | Upstream candidate series against freebsd-src `stable/15` at `169e254b` (hardware-validated base) |
-| `patches/main/0001-0007` | The same series rebased onto freebsd-src `main` at `91bff7d7ed4` (no conflicts) |
-| `patches/local/0008-0010` | Local only, not for upstream: ATH12KHOST/ATH12KLAB kernel configs, test harnesses, rc.d script. Apply on top of `stable-15` |
-| `tools/ath12k_wlan.rc` | rc.d script that brings up `wlan0` at boot (also in `local/0010`) |
+| `patches/stable-15/0001-0008` | Upstream candidate series against freebsd-src `stable/15` at `169e254b` (hardware-validated base) |
+| `patches/main/0001-0008` | The same series rebased onto freebsd-src `main` at `91bff7d7ed4` (no conflicts) |
+| `patches/local/0009-0011` | Local only, not for upstream: ATH12KHOST/ATH12KLAB kernel configs, test harnesses, rc.d script. Apply on top of `stable-15` |
+| `tools/ath12k_wlan.rc` | rc.d script that brings up `wlan0` at boot (also in `local/0011`) |
 
-The upstream series is split for review: one ath12k Makefile fix, the net80211 hook, LinuxKPI primitives, LinuxKPI MHI/QMI, LinuxKPI 802.11, ath12k WCN7850 support, and the ath12k 4-way handshake fix.
+The upstream series is split for review: one ath12k Makefile fix, the net80211 hook, LinuxKPI primitives, LinuxKPI MHI/QMI, LinuxKPI 802.11, ath12k WCN7850 support, the ath12k 4-way handshake fix, and the ath12k(4) manual page.
 
 - Changes to vendor code in `sys/contrib/dev/athk` are additive only: each one is wrapped in `#if defined(__FreeBSD__)` and keeps the original Linux code under `#else`.
 - Native code follows style(9).

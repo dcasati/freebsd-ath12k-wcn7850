@@ -1,7 +1,7 @@
 From 7a8cd235dd4f197ea3e9cc779ba5070310ffcc2a Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 14:44:30 -0600
-Subject: [PATCH 4/7] LinuxKPI: implement MHI host and QMI interfaces
+Subject: [PATCH 4/8] LinuxKPI: implement MHI host and QMI interfaces
 
 Add an MHI host implementation (BHI/BHIe firmware download, channel and
 event rings, M-state handling).  The firmware boot sequence follows

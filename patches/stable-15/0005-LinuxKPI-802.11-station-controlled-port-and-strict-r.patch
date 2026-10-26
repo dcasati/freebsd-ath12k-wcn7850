@@ -1,7 +1,7 @@
 From 96e6872c6e0a7533c8a651c53920cc9374b82be2 Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 14:44:30 -0600
-Subject: [PATCH 5/7] LinuxKPI: 802.11 station controlled port and strict
+Subject: [PATCH 5/8] LinuxKPI: 802.11 station controlled port and strict
  regulatory
 
 - Gate the WPA2 controlled port on a TX-acked EAPOL M4, installed
