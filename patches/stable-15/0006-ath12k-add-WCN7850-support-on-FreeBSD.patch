@@ -1,4 +1,4 @@
-From af47bda5cc81ba4426c20f3d97d51d42cf296b77 Mon Sep 17 00:00:00 2001
+From f0ce64fac61b8cd8cdc01d08f1826253e7a8d8ab Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 14:44:31 -0600
 Subject: [PATCH 6/8] ath12k: add WCN7850 support on FreeBSD
@@ -30,8 +30,8 @@ Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
 ---
  sys/contrib/dev/athk/ath12k/ce.c           |  43 ++
  sys/contrib/dev/athk/ath12k/ce.h           |   8 +
- sys/contrib/dev/athk/ath12k/core.c         | 300 ++++++++++
- sys/contrib/dev/athk/ath12k/core.h         |  25 +
+ sys/contrib/dev/athk/ath12k/core.c         | 326 +++++++++++
+ sys/contrib/dev/athk/ath12k/core.h         |  28 +
  sys/contrib/dev/athk/ath12k/dp.c           | 623 +++++++++++++++++++++
  sys/contrib/dev/athk/ath12k/dp.h           |  62 ++
  sys/contrib/dev/athk/ath12k/dp_cc.h        |  60 ++
@@ -48,7 +48,7 @@ Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
  sys/contrib/dev/athk/ath12k/htc.h          |  67 +++
  sys/contrib/dev/athk/ath12k/mac.c          | 157 ++++++
  sys/contrib/dev/athk/ath12k/mhi.c          |  25 +
- sys/contrib/dev/athk/ath12k/pci.c          | 297 ++++++++++
+ sys/contrib/dev/athk/ath12k/pci.c          | 307 ++++++++++
  sys/contrib/dev/athk/ath12k/pci.h          |  13 +
  sys/contrib/dev/athk/ath12k/peer.c         |   4 +
  sys/contrib/dev/athk/ath12k/qmi.c          | 160 ++++++
@@ -66,7 +66,7 @@ Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
  sys/contrib/dev/athk/ath12k/wifi7/pci.c    |   4 +
  sys/contrib/dev/athk/ath12k/wmi.c          | 581 +++++++++++++++++++
  sys/contrib/dev/athk/ath12k/wmi.h          | 158 ++++++
- 38 files changed, 3639 insertions(+)
+ 38 files changed, 3678 insertions(+)
  create mode 100644 sys/contrib/dev/athk/ath12k/dp_cc.h
 
 diff --git a/sys/contrib/dev/athk/ath12k/ce.c b/sys/contrib/dev/athk/ath12k/ce.c
@@ -195,7 +195,7 @@ index df4f2a4f848..631cd59e417 100644
  	struct ath12k_ce_ring *dest_ring;
  	struct ath12k_ce_ring *status_ring;
 diff --git a/sys/contrib/dev/athk/ath12k/core.c b/sys/contrib/dev/athk/ath12k/core.c
-index 1763b3b837e..46e2968c9da 100644
+index 1763b3b837e..fc55991fb05 100644
 --- a/sys/contrib/dev/athk/ath12k/core.c
 +++ b/sys/contrib/dev/athk/ath12k/core.c
 @@ -17,8 +17,12 @@
@@ -243,7 +243,7 @@ index 1763b3b837e..46e2968c9da 100644
  
  static inline
  void ath12k_core_to_group_ref_get(struct ath12k_base *ab)
-@@ -725,20 +739,104 @@ void ath12k_core_to_group_ref_put(struct ath12k_base *ab)
+@@ -725,20 +739,127 @@ void ath12k_core_to_group_ref_put(struct ath12k_base *ab)
  		   ag->id, ag->num_started);
  }
  
@@ -308,6 +308,29 @@ index 1763b3b837e..46e2968c9da 100644
 +	mutex_lock(&ag->mutex);
 +	return ret;
 +}
++
++/*
++ * Unregister from mac80211 while the firmware still runs, as Linux does, so
++ * that interface, station and key teardown can complete over WMI.  Native
++ * quiescence resets the device and therefore has to come after this.
++ */
++static void ath12k_core_native_mac_unregister_locked(struct ath12k_hw_group *ag)
++{
++	lockdep_assert_held(&ag->mutex);
++	if (test_and_clear_bit(ATH12K_GROUP_FLAG_REGISTERED, &ag->flags))
++		ath12k_mac_unregister(ag);
++}
++
++void ath12k_core_native_mac_unregister(struct ath12k_base *ab)
++{
++	struct ath12k_hw_group *ag = ab->ag;
++
++	if (ag == NULL)
++		return;
++	mutex_lock(&ag->mutex);
++	ath12k_core_native_mac_unregister_locked(ag);
++	mutex_unlock(&ag->mutex);
++}
 +#endif
 +#endif
 +
@@ -348,7 +371,7 @@ index 1763b3b837e..46e2968c9da 100644
  	ath12k_dp_cmn_device_deinit(ath12k_ab_to_dp(ab));
  
  	/* De-Init of components as needed */
-@@ -748,7 +846,12 @@ static void ath12k_core_check_cc_code_bdfext(const struct dmi_header *hdr, void
+@@ -748,7 +869,12 @@ static void ath12k_core_check_cc_code_bdfext(const struct dmi_header *hdr, void
  {
  	struct ath12k_base *ab = data;
  	const char *magic = ATH12K_SMBIOS_BDF_EXT_MAGIC;
@@ -361,7 +384,7 @@ index 1763b3b837e..46e2968c9da 100644
  	ssize_t copied;
  	size_t len;
  	int i;
-@@ -839,6 +942,17 @@ static int ath12k_core_soc_create(struct ath12k_base *ab)
+@@ -839,6 +965,17 @@ static int ath12k_core_soc_create(struct ath12k_base *ab)
  {
  	int ret;
  
@@ -379,7 +402,7 @@ index 1763b3b837e..46e2968c9da 100644
  	if (ath12k_ftm_mode) {
  		ab->fw_mode = ATH12K_FIRMWARE_MODE_FTM;
  		ath12k_info(ab, "Booting in ftm mode\n");
-@@ -863,6 +977,10 @@ static int ath12k_core_soc_create(struct ath12k_base *ab)
+@@ -863,6 +1000,10 @@ static int ath12k_core_soc_create(struct ath12k_base *ab)
  	return 0;
  
  err_qmi_deinit:
@@ -390,7 +413,7 @@ index 1763b3b837e..46e2968c9da 100644
  	ath12k_debugfs_soc_destroy(ab);
  	ath12k_qmi_deinit_service(ab);
  	return ret;
-@@ -870,7 +988,17 @@ static int ath12k_core_soc_create(struct ath12k_base *ab)
+@@ -870,7 +1011,17 @@ static int ath12k_core_soc_create(struct ath12k_base *ab)
  
  static void ath12k_core_soc_destroy(struct ath12k_base *ab)
  {
@@ -408,7 +431,7 @@ index 1763b3b837e..46e2968c9da 100644
  	ath12k_reg_free(ab);
  	ath12k_debugfs_soc_destroy(ab);
  	ath12k_qmi_deinit_service(ab);
-@@ -886,12 +1014,22 @@ static int ath12k_core_pdev_create(struct ath12k_base *ab)
+@@ -886,12 +1037,22 @@ static int ath12k_core_pdev_create(struct ath12k_base *ab)
  		return ret;
  	}
  
@@ -431,7 +454,7 @@ index 1763b3b837e..46e2968c9da 100644
  }
  
  static int ath12k_core_start(struct ath12k_base *ab)
-@@ -906,6 +1044,14 @@ static int ath12k_core_start(struct ath12k_base *ab)
+@@ -906,6 +1067,14 @@ static int ath12k_core_start(struct ath12k_base *ab)
  		return ret;
  	}
  
@@ -446,7 +469,7 @@ index 1763b3b837e..46e2968c9da 100644
  	ret = ath12k_htc_init(ab);
  	if (ret) {
  		ath12k_err(ab, "failed to init htc: %d\n", ret);
-@@ -949,7 +1095,16 @@ static int ath12k_core_start(struct ath12k_base *ab)
+@@ -949,7 +1118,16 @@ static int ath12k_core_start(struct ath12k_base *ab)
  		goto err_hif_stop;
  	}
  
@@ -463,7 +486,7 @@ index 1763b3b837e..46e2968c9da 100644
  
  	ret = ath12k_dp_rx_pdev_reo_setup(ab);
  	if (ret) {
-@@ -957,6 +1112,12 @@ static int ath12k_core_start(struct ath12k_base *ab)
+@@ -957,6 +1135,12 @@ static int ath12k_core_start(struct ath12k_base *ab)
  		goto err_hif_stop;
  	}
  
@@ -476,7 +499,7 @@ index 1763b3b837e..46e2968c9da 100644
  	ret = ath12k_wmi_cmd_init(ab);
  	if (ret) {
  		ath12k_err(ab, "failed to send wmi init cmd: %d\n", ret);
-@@ -979,6 +1140,14 @@ static int ath12k_core_start(struct ath12k_base *ab)
+@@ -979,6 +1163,14 @@ static int ath12k_core_start(struct ath12k_base *ab)
  		}
  	}
  
@@ -491,7 +514,7 @@ index 1763b3b837e..46e2968c9da 100644
  	ret = ath12k_dp_tx_htt_h2t_ver_req_msg(ab);
  	if (ret) {
  		ath12k_err(ab, "failed to send htt version request message: %d\n",
-@@ -994,17 +1163,38 @@ static int ath12k_core_start(struct ath12k_base *ab)
+@@ -994,17 +1186,38 @@ static int ath12k_core_start(struct ath12k_base *ab)
  	ret = ath12k_link_sta_rhash_tbl_init(ab);
  	if (ret) {
  		ath12k_warn(ab, "failed to init peer addr rhash table %d\n", ret);
@@ -530,18 +553,23 @@ index 1763b3b837e..46e2968c9da 100644
  	return ret;
  }
  
-@@ -1025,6 +1215,10 @@ static void ath12k_core_hw_group_stop(struct ath12k_hw_group *ag)
+@@ -1025,9 +1238,15 @@ static void ath12k_core_hw_group_stop(struct ath12k_hw_group *ag)
  
  	lockdep_assert_held(&ag->mutex);
  
 +#if defined(__FreeBSD__)
++	ath12k_core_native_mac_unregister_locked(ag);
 +	if (ath12k_core_native_group_quiesce_locked(ag))
 +		return;
-+#endif
++#else
  	clear_bit(ATH12K_GROUP_FLAG_REGISTERED, &ag->flags);
  
  	ath12k_mac_unregister(ag);
-@@ -1180,7 +1374,14 @@ static int ath12k_core_hw_group_start(struct ath12k_hw_group *ag)
++#endif
+ 
+ 	for (i = ag->num_devices - 1; i >= 0; i--) {
+ 		ab = ag->ab[i];
+@@ -1180,7 +1399,14 @@ static int ath12k_core_hw_group_start(struct ath12k_hw_group *ag)
  			goto err;
  		}
  
@@ -556,7 +584,7 @@ index 1763b3b837e..46e2968c9da 100644
  
  		ret = ath12k_core_rfkill_config(ab);
  		if (ret && ret != -EOPNOTSUPP) {
-@@ -1198,9 +1399,17 @@ static int ath12k_core_hw_group_start(struct ath12k_hw_group *ag)
+@@ -1198,9 +1424,17 @@ static int ath12k_core_hw_group_start(struct ath12k_hw_group *ag)
  	return ret;
  
  err_mlo_teardown:
@@ -574,7 +602,7 @@ index 1763b3b837e..46e2968c9da 100644
  	ath12k_mac_destroy(ag);
  
  	return ret;
-@@ -1367,12 +1576,23 @@ int ath12k_core_qmi_firmware_ready(struct ath12k_base *ab)
+@@ -1367,12 +1601,23 @@ int ath12k_core_qmi_firmware_ready(struct ath12k_base *ab)
  	goto exit;
  
  err_deinit:
@@ -598,7 +626,7 @@ index 1763b3b837e..46e2968c9da 100644
  
  exit:
  	return ret;
-@@ -1382,11 +1602,30 @@ static int ath12k_core_reconfigure_on_crash(struct ath12k_base *ab)
+@@ -1382,11 +1627,30 @@ static int ath12k_core_reconfigure_on_crash(struct ath12k_base *ab)
  {
  	int ret, total_vdev;
  
@@ -629,7 +657,7 @@ index 1763b3b837e..46e2968c9da 100644
  	ath12k_dp_rx_pdev_reo_cleanup(ab);
  	mutex_unlock(&ab->core_lock);
  
-@@ -1787,6 +2026,28 @@ int ath12k_core_pre_init(struct ath12k_base *ab)
+@@ -1787,6 +2051,28 @@ int ath12k_core_pre_init(struct ath12k_base *ab)
  	return 0;
  }
  
@@ -658,7 +686,7 @@ index 1763b3b837e..46e2968c9da 100644
  static int ath12k_core_panic_handler(struct notifier_block *nb,
  				     unsigned long action, void *data)
  {
-@@ -1809,6 +2070,7 @@ static void ath12k_core_panic_notifier_unregister(struct ath12k_base *ab)
+@@ -1809,6 +2095,7 @@ static void ath12k_core_panic_notifier_unregister(struct ath12k_base *ab)
  	atomic_notifier_chain_unregister(&panic_notifier_list,
  					 &ab->panic_nb);
  }
@@ -666,7 +694,7 @@ index 1763b3b837e..46e2968c9da 100644
  
  static inline
  bool ath12k_core_hw_group_create_ready(struct ath12k_hw_group *ag)
-@@ -1850,6 +2112,7 @@ static void ath12k_core_hw_group_free(struct ath12k_hw_group *ag)
+@@ -1850,6 +2137,7 @@ static void ath12k_core_hw_group_free(struct ath12k_hw_group *ag)
  	mutex_unlock(&ath12k_hw_group_mutex);
  }
  
@@ -674,7 +702,7 @@ index 1763b3b837e..46e2968c9da 100644
  static struct ath12k_hw_group *ath12k_core_hw_group_find_by_dt(struct ath12k_base *ab)
  {
  	struct ath12k_hw_group *ag;
-@@ -1950,6 +2213,7 @@ static int ath12k_core_get_wsi_index(struct ath12k_hw_group *ag,
+@@ -1950,6 +2238,7 @@ static int ath12k_core_get_wsi_index(struct ath12k_hw_group *ag,
  
  	return 0;
  }
@@ -682,7 +710,7 @@ index 1763b3b837e..46e2968c9da 100644
  
  static struct ath12k_hw_group *ath12k_core_hw_group_assign(struct ath12k_base *ab)
  {
-@@ -1958,6 +2222,7 @@ static struct ath12k_hw_group *ath12k_core_hw_group_assign(struct ath12k_base *a
+@@ -1958,6 +2247,7 @@ static struct ath12k_hw_group *ath12k_core_hw_group_assign(struct ath12k_base *a
  
  	lockdep_assert_held(&ath12k_hw_group_mutex);
  
@@ -690,7 +718,7 @@ index 1763b3b837e..46e2968c9da 100644
  	if (ath12k_ftm_mode)
  		goto invalid_group;
  
-@@ -2001,6 +2266,9 @@ static struct ath12k_hw_group *ath12k_core_hw_group_assign(struct ath12k_base *a
+@@ -2001,6 +2291,9 @@ static struct ath12k_hw_group *ath12k_core_hw_group_assign(struct ath12k_base *a
  			goto invalid_group;
  		goto exit;
  	}
@@ -700,7 +728,7 @@ index 1763b3b837e..46e2968c9da 100644
  
  invalid_group:
  	ag = ath12k_core_hw_group_alloc(ab);
-@@ -2015,7 +2283,9 @@ static struct ath12k_hw_group *ath12k_core_hw_group_assign(struct ath12k_base *a
+@@ -2015,7 +2308,9 @@ static struct ath12k_hw_group *ath12k_core_hw_group_assign(struct ath12k_base *a
  
  	ath12k_dbg(ab, ATH12K_DBG_BOOT, "single device added to hardware group\n");
  
@@ -710,11 +738,12 @@ index 1763b3b837e..46e2968c9da 100644
  	if (ag->num_probed >= ag->num_devices) {
  		ath12k_warn(ab, "unable to add new device to group, max limit reached\n");
  		goto invalid_group;
-@@ -2103,6 +2373,12 @@ void ath12k_core_hw_group_cleanup(struct ath12k_hw_group *ag)
+@@ -2103,6 +2398,13 @@ void ath12k_core_hw_group_cleanup(struct ath12k_hw_group *ag)
  		return;
  	}
  
 +#if defined(__FreeBSD__)
++	ath12k_core_native_mac_unregister_locked(ag);
 +	if (ath12k_core_native_group_quiesce_locked(ag)) {
 +		mutex_unlock(&ag->mutex);
 +		return;
@@ -723,7 +752,7 @@ index 1763b3b837e..46e2968c9da 100644
  	set_bit(ATH12K_GROUP_FLAG_UNREGISTER, &ag->flags);
  
  	ath12k_core_hw_group_stop(ag);
-@@ -2162,6 +2438,11 @@ static int ath12k_core_hw_group_create(struct ath12k_hw_group *ag)
+@@ -2162,6 +2464,11 @@ static int ath12k_core_hw_group_create(struct ath12k_hw_group *ag)
  
  void ath12k_core_hw_group_set_mlo_capable(struct ath12k_hw_group *ag)
  {
@@ -735,7 +764,7 @@ index 1763b3b837e..46e2968c9da 100644
  	struct ath12k_base *ab;
  	int i;
  
-@@ -2199,6 +2480,7 @@ void ath12k_core_hw_group_set_mlo_capable(struct ath12k_hw_group *ag)
+@@ -2199,6 +2506,7 @@ void ath12k_core_hw_group_set_mlo_capable(struct ath12k_hw_group *ag)
  			return;
  		}
  	}
@@ -743,7 +772,7 @@ index 1763b3b837e..46e2968c9da 100644
  }
  
  int ath12k_core_init(struct ath12k_base *ab)
-@@ -2241,6 +2523,10 @@ int ath12k_core_init(struct ath12k_base *ab)
+@@ -2241,6 +2549,10 @@ int ath12k_core_init(struct ath12k_base *ab)
  	return 0;
  
  err_unassign_hw_group:
@@ -754,7 +783,7 @@ index 1763b3b837e..46e2968c9da 100644
  	ath12k_core_hw_group_unassign(ab);
  err_unregister_notifier:
  	ath12k_core_panic_notifier_unregister(ab);
-@@ -2250,13 +2536,27 @@ int ath12k_core_init(struct ath12k_base *ab)
+@@ -2250,13 +2562,27 @@ int ath12k_core_init(struct ath12k_base *ab)
  
  void ath12k_core_deinit(struct ath12k_base *ab)
  {
@@ -783,7 +812,7 @@ index 1763b3b837e..46e2968c9da 100644
  	destroy_workqueue(ab->workqueue_aux);
  	destroy_workqueue(ab->workqueue);
 diff --git a/sys/contrib/dev/athk/ath12k/core.h b/sys/contrib/dev/athk/ath12k/core.h
-index fe91632f5c6..1499d1144fe 100644
+index fe91632f5c6..2e233c6ad0a 100644
 --- a/sys/contrib/dev/athk/ath12k/core.h
 +++ b/sys/contrib/dev/athk/ath12k/core.h
 @@ -14,8 +14,14 @@
@@ -842,7 +871,17 @@ index fe91632f5c6..1499d1144fe 100644
  
  	struct ath12k_hw_group *ag;
  	struct ath12k_wsi_info wsi_info;
-@@ -1292,8 +1313,10 @@ void ath12k_fw_stats_init(struct ath12k *ar);
+@@ -1259,6 +1280,9 @@ struct ath12k_fw_stats_pdev {
+ 
+ int ath12k_core_qmi_firmware_ready(struct ath12k_base *ab);
+ void ath12k_core_hw_group_cleanup(struct ath12k_hw_group *ag);
++#if defined(__FreeBSD__)
++void ath12k_core_native_mac_unregister(struct ath12k_base *ab);
++#endif
+ int ath12k_core_pre_init(struct ath12k_base *ab);
+ int ath12k_core_init(struct ath12k_base *ath12k);
+ void ath12k_core_deinit(struct ath12k_base *ath12k);
+@@ -1292,8 +1316,10 @@ void ath12k_fw_stats_init(struct ath12k *ar);
  void ath12k_fw_stats_bcn_free(struct list_head *head);
  void ath12k_fw_stats_free(struct ath12k_fw_stats *stats);
  void ath12k_fw_stats_reset(struct ath12k *ar);
@@ -853,7 +892,7 @@ index fe91632f5c6..1499d1144fe 100644
  enum ath12k_qmi_mem_mode ath12k_core_get_memory_mode(struct ath12k_base *ab);
  
  static inline const char *ath12k_scan_state_str(enum ath12k_scan_state state)
-@@ -1357,7 +1380,9 @@ static inline void ath12k_core_create_firmware_path(struct ath12k_base *ab,
+@@ -1357,7 +1383,9 @@ static inline void ath12k_core_create_firmware_path(struct ath12k_base *ab,
  {
  	const char *fw_name = NULL;
  
@@ -3285,7 +3324,7 @@ index 69a377c15bb..c5b671c58d5 100644
 +#endif
  }
 diff --git a/sys/contrib/dev/athk/ath12k/pci.c b/sys/contrib/dev/athk/ath12k/pci.c
-index 12ce5ed40b4..ac55826661e 100644
+index 12ce5ed40b4..453d731d296 100644
 --- a/sys/contrib/dev/athk/ath12k/pci.c
 +++ b/sys/contrib/dev/athk/ath12k/pci.c
 @@ -326,11 +326,23 @@ static void ath12k_pci_free_ext_irq(struct ath12k_base *ab)
@@ -3841,14 +3880,24 @@ index 12ce5ed40b4..ac55826661e 100644
  	ath12k_core_free(ab);
  
  	return ret;
-@@ -1730,6 +2008,16 @@ static void ath12k_pci_remove(struct pci_dev *pdev)
+@@ -1730,6 +2008,26 @@ static void ath12k_pci_remove(struct pci_dev *pdev)
  	struct ath12k_base *ab = pci_get_drvdata(pdev);
  	struct ath12k_pci *ab_pci = ath12k_pci_priv(ab);
  
 +#if defined(__FreeBSD__)
 +	set_bit(ATH12K_FLAG_UNREGISTERING, &ab->dev_flags);
++	/*
++	 * Fence QMI and recovery work before unregistering mac80211 so an
++	 * in-flight FW_READY cannot re-register and recovery cannot reset
++	 * the firmware during teardown.  Later QMI events are skipped.
++	 */
++	if (ab->qmi.event_wq != NULL)
++		cancel_work_sync(&ab->qmi.event_work);
++	cancel_work_sync(&ab->restart_work);
 +	cancel_work_sync(&ab->reset_work);
 +	cancel_work_sync(&ab->dump_work);
++	if (!test_bit(ATH12K_FLAG_QMI_FAIL, &ab->dev_flags))
++		ath12k_core_native_mac_unregister(ab);
 +	if (ath12k_dp_dma_quiesce(ab) || ath12k_pci_quiesce(ab) ||
 +	    ath12k_dp_dma_owned(ab)) {
 +		ath12k_pci_retain_owner(ab);
@@ -3858,7 +3907,7 @@ index 12ce5ed40b4..ac55826661e 100644
  	ath12k_pci_set_irq_affinity_hint(ab_pci, NULL);
  
  	if (test_bit(ATH12K_FLAG_QMI_FAIL, &ab->dev_flags)) {
-@@ -1745,6 +2033,12 @@ static void ath12k_pci_remove(struct pci_dev *pdev)
+@@ -1745,6 +2043,12 @@ static void ath12k_pci_remove(struct pci_dev *pdev)
  
  qmi_fail:
  	ath12k_core_deinit(ab);
@@ -3871,7 +3920,7 @@ index 12ce5ed40b4..ac55826661e 100644
  	ath12k_fw_unmap(ab);
  	ath12k_mhi_unregister(ab_pci);
  
-@@ -1757,6 +2051,9 @@ static void ath12k_pci_remove(struct pci_dev *pdev)
+@@ -1757,6 +2061,9 @@ static void ath12k_pci_remove(struct pci_dev *pdev)
  
  	ab_pci->device_family_ops->arch_deinit(ab);
  

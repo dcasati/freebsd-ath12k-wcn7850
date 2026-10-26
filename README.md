@@ -6,7 +6,7 @@ Status: station mode with WPA2-PSK works on 2.4 GHz (20 MHz) and 5 GHz (HT40/VHT
 
 - 30-minute soak: 1800/1800 pings, 0% loss.
 - 20/20 disconnect/reconnect cycles passed.
-- 10/10 driver unload/reload cycles passed (service stopped first). Unloading while associated hangs the host; see BUGS in ath12k(4).
+- 10/10 driver unload/reload cycles passed, both with the service stopped first and hot while associated (no WMI timeouts).
 - iperf3 download: about 280 Mb/s over TCP. UDP at 200 and 300 Mb/s: under 0.5% loss.
 - The in-kernel regulatory test and the regulatory model test pass.
 

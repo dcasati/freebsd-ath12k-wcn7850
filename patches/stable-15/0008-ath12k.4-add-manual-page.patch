@@ -1,4 +1,4 @@
-From 37b118716e4c893e985922c440522774d6447379 Mon Sep 17 00:00:00 2001
+From 521f3146b3b18a3102d30f0ef17ef13bcfa6a52c Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
 Date: Mon, 26 Oct 2026 13:01:02 -0600
 Subject: [PATCH 8/8] ath12k.4: add manual page
@@ -15,17 +15,17 @@ module is not built from sys/modules/Makefile.
 
 Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
 ---
- share/man/man4/ath12k.4        | 164 +++++++++++++++++++++++++++++++++
+ share/man/man4/ath12k.4        | 156 +++++++++++++++++++++++++++++++++
  share/man/man4/linuxkpi_wlan.4 |   4 +-
- 2 files changed, 167 insertions(+), 1 deletion(-)
+ 2 files changed, 159 insertions(+), 1 deletion(-)
  create mode 100644 share/man/man4/ath12k.4
 
 diff --git a/share/man/man4/ath12k.4 b/share/man/man4/ath12k.4
 new file mode 100644
-index 00000000000..254aa8f5e62
+index 00000000000..657c90f7524
 --- /dev/null
 +++ b/share/man/man4/ath12k.4
-@@ -0,0 +1,164 @@
+@@ -0,0 +1,156 @@
 +.\"
 +.\" Copyright (c) 2026 Diego Casati <diego.casati@gmail.com>
 +.\"
@@ -182,14 +182,6 @@ index 00000000000..254aa8f5e62
 +the 6 GHz band are not supported.
 +.Pp
 +Host AP mode is not supported and monitor mode has not been tested.
-+.Pp
-+Unloading the driver while a
-+.Xr wlan 4
-+interface is associated can hang the system.
-+Destroy the
-+.Xr wlan 4
-+interface before unloading
-+.Nm .
 diff --git a/share/man/man4/linuxkpi_wlan.4 b/share/man/man4/linuxkpi_wlan.4
 index fa0b15b5e0b..d37b262e4cb 100644
 --- a/share/man/man4/linuxkpi_wlan.4
