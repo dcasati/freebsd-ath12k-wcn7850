@@ -1,4 +1,4 @@
-From b52cdcf494d347022dbaff22b3d5189ac6a4de04 Mon Sep 17 00:00:00 2001
+From 8b01aa9eebaf5eb7cd569f41ae7ffdf1c75bc543 Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 14:44:29 -0600
 Subject: [PATCH 2/7] net80211: add optional controlled-port authorize hook

@@ -1,4 +1,4 @@
-From bf3c08bd26328b4ade65d26467e855c4d9154791 Mon Sep 17 00:00:00 2001
+From 700e910c5d9c71397e1cc91ab8f580df3334b768 Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 14:44:31 -0600
 Subject: [PATCH 09/10] tests: add LinuxKPI wlan, MHI, QMI and regulatory test
@@ -32,9 +32,9 @@ Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
  sys/tests/linuxkpi_wlan/mhi_wmi.c             |  441 ++++
  sys/tests/linuxkpi_wlan/mhi_wmi.h             |   65 +
  sys/tests/linuxkpi_wlan/mhi_wmi_cases.h       |  291 +++
- sys/tests/linuxkpi_wlan/qmi_native_test.c     |  255 +++
- .../regulatory_production_test.py             |  369 ++++
- sys/tests/linuxkpi_wlan/regulatory_test.c     |  219 ++
+ sys/tests/linuxkpi_wlan/qmi_codec_test.c      |  255 +++
+ .../regulatory_production_test.py             |  391 ++++
+ sys/tests/linuxkpi_wlan/regulatory_test.c     |  288 +++
  sys/tests/linuxkpi_wlan/rhashtable_test.c     |  160 ++
  sys/tests/linuxkpi_wlan/station_acceptance.sh |  410 ++++
  .../linuxkpi_wlan/station_acceptance_test.py  |  288 +++
@@ -46,7 +46,7 @@ Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
  .../linuxkpi_wlan/station_tx_lock_test.py     |  184 ++
  sys/tests/linuxkpi_wlan/wcn7850_tables.c      |  276 +++
  sys/tests/linuxkpi_wlan/wmi_protocol_test.c   |  164 ++
- 32 files changed, 9819 insertions(+)
+ 32 files changed, 9910 insertions(+)
  create mode 100644 sys/modules/tests/linuxkpi_mhi/Makefile
  create mode 100644 sys/modules/tests/linuxkpi_mhi_boot/Makefile
  create mode 100644 sys/modules/tests/linuxkpi_regulatory/Makefile
@@ -65,7 +65,7 @@ Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
  create mode 100644 sys/tests/linuxkpi_wlan/mhi_wmi.c
  create mode 100644 sys/tests/linuxkpi_wlan/mhi_wmi.h
  create mode 100644 sys/tests/linuxkpi_wlan/mhi_wmi_cases.h
- create mode 100644 sys/tests/linuxkpi_wlan/qmi_native_test.c
+ create mode 100644 sys/tests/linuxkpi_wlan/qmi_codec_test.c
  create mode 100644 sys/tests/linuxkpi_wlan/regulatory_production_test.py
  create mode 100644 sys/tests/linuxkpi_wlan/regulatory_test.c
  create mode 100644 sys/tests/linuxkpi_wlan/rhashtable_test.c
@@ -6924,18 +6924,18 @@ index 00000000000..091cea194a9
 +	return (mhi_wmi_semantic_test());
 +}
 +#endif
-diff --git a/sys/tests/linuxkpi_wlan/qmi_native_test.c b/sys/tests/linuxkpi_wlan/qmi_native_test.c
+diff --git a/sys/tests/linuxkpi_wlan/qmi_codec_test.c b/sys/tests/linuxkpi_wlan/qmi_codec_test.c
 new file mode 100644
-index 00000000000..bbe390d0cfe
+index 00000000000..7521218a438
 --- /dev/null
-+++ b/sys/tests/linuxkpi_wlan/qmi_native_test.c
++++ b/sys/tests/linuxkpi_wlan/qmi_codec_test.c
 @@ -0,0 +1,255 @@
 +/* SPDX-License-Identifier: BSD-2-Clause */
 +#include <sys/param.h>
 +#include <sys/endian.h>
 +#include <sys/systm.h>
 +
-+#include "qmi_native.h"
++#include "linux_qmi.h"
 +
 +/* Standalone codec executable: these linker-set bounds are never dereferenced. */
 +uintptr_t *__start_set_pcpu, *__stop_set_pcpu;
@@ -6944,7 +6944,7 @@ index 00000000000..bbe390d0cfe
 +
 +#define TEST(expr) do {						\
 +	if (!(expr)) {						\
-+		printf("qmi_native_test:%d: %s\n", __LINE__, #expr);	\
++		printf("qmi_codec_test:%d: %s\n", __LINE__, #expr);	\
 +		return (1);					\
 +	}							\
 +} while (0)
@@ -7037,7 +7037,7 @@ index 00000000000..bbe390d0cfe
 +	struct version_response version = { .version = {
 +		.number = 0x1103006c, .timestamp = "native" } }, decoded_version;
 +	uint8_t packet[256], copy[256], frame_packet[256];
-+	struct ath12k_qmi_native_frame frame;
++	struct lkpi_qrtr_frame frame;
 +	struct qmi_txn txn = { .ei = cap_ei, .id = 42, .message = 0x24,
 +		.active = true, .sent = true };
 +	struct {
@@ -7047,11 +7047,11 @@ index 00000000000..bbe390d0cfe
 +	} guarded;
 +	size_t length, i, j, cut;
 +
-+	TEST(ath12k_qmi_native_encode(cap_ei, &input, packet, sizeof(packet),
++	TEST(lkpi_qmi_encode(cap_ei, &input, packet, sizeof(packet),
 +	    &length) == 0);
 +	TEST(length == 74 && packet[7] == 0x1c && le16dec(packet + 8) == 64);
 +	TEST(le64dec(packet + 10) == 0x113000 && le64dec(packet + 18) == 0x5000);
-+	TEST(ath12k_qmi_native_decode(cap_ei, packet, length, &output,
++	TEST(lkpi_qmi_decode(cap_ei, packet, length, &output,
 +	    sizeof(output)) == 0);
 +	TEST(output.valid && output.memory[0].start == input.memory[0].start &&
 +	    output.memory[0].size == input.memory[0].size);
@@ -7060,26 +7060,26 @@ index 00000000000..bbe390d0cfe
 +	memset(&saved, 0xa5, sizeof(saved));
 +	output = saved;
 +	le16enc(packet + 8, 63);
-+	TEST(ath12k_qmi_native_decode(cap_ei, packet, length, &output,
++	TEST(lkpi_qmi_decode(cap_ei, packet, length, &output,
 +	    sizeof(output)) != 0);
 +	TEST(memcmp(&output, &saved, sizeof(output)) == 0);
 +	le16enc(packet + 8, 64);
 +	memcpy(copy, packet, length);
 +	memcpy(copy + length, packet, 7);
-+	TEST(ath12k_qmi_native_decode(cap_ei, copy, length + 7, &output,
++	TEST(lkpi_qmi_decode(cap_ei, copy, length + 7, &output,
 +	    sizeof(output)) == -EBADMSG);
-+	TEST(ath12k_qmi_native_decode(cap_ei, packet + 7, length - 7, &output,
++	TEST(lkpi_qmi_decode(cap_ei, packet + 7, length - 7, &output,
 +	    sizeof(output)) == -ENOMSG);
-+	TEST(ath12k_qmi_native_decode(cap_ei, packet, 7, &output,
++	TEST(lkpi_qmi_decode(cap_ei, packet, 7, &output,
 +	    sizeof(output)) == 0 && !output.valid);
 +	for (cut = 0; cut < 74; cut++) {
 +		memset(packet, 0xcc, sizeof(packet));
-+		TEST(ath12k_qmi_native_encode(cap_ei, &input, packet, cut,
++		TEST(lkpi_qmi_encode(cap_ei, &input, packet, cut,
 +		    &length) != 0);
 +		for (j = cut; j < sizeof(packet); j++)
 +			TEST(packet[j] == 0xcc);
 +	}
-+	TEST(ath12k_qmi_native_encode(cap_ei, &input, packet, sizeof(packet),
++	TEST(lkpi_qmi_encode(cap_ei, &input, packet, sizeof(packet),
 +	    &length) == 0);
 +	for (i = 0; i < length; i++)
 +		for (j = 0; j < 8; j++) {
@@ -7087,7 +7087,7 @@ index 00000000000..bbe390d0cfe
 +			copy[i] ^= 1U << j;
 +			guarded.before = guarded.after = UINT64_MAX;
 +			guarded.value = saved;
-+			if (ath12k_qmi_native_decode(cap_ei, copy, length,
++			if (lkpi_qmi_decode(cap_ei, copy, length,
 +			    &guarded.value, sizeof(guarded.value)) != 0)
 +				TEST(memcmp(&guarded.value, &saved, sizeof(saved)) == 0);
 +			TEST(guarded.before == UINT64_MAX && guarded.after == UINT64_MAX);
@@ -7105,44 +7105,44 @@ index 00000000000..bbe390d0cfe
 +	le16enc(frame_packet + 35, txn.message);
 +	le16enc(frame_packet + 37, length);
 +	memcpy(frame_packet + 39, packet, length);
-+	TEST(ath12k_qmi_native_frame_decode(frame_packet, 116, &frame) == 0);
-+	TEST(ath12k_qmi_native_reply(&frame, 7, 9, &txn, &output,
++	TEST(lkpi_qrtr_frame_decode(frame_packet, 116, &frame) == 0);
++	TEST(lkpi_qmi_reply(&frame, 7, 9, &txn, &output,
 +	    sizeof(output)) == 0 && output.valid);
 +	frame_packet[32] = QMI_INDICATION;
 +	le16enc(frame_packet + 33, 1);
 +	le16enc(frame_packet + 35, 0x35);
-+	TEST(ath12k_qmi_native_frame_decode(frame_packet, 116, &frame) == 0 &&
++	TEST(lkpi_qrtr_frame_decode(frame_packet, 116, &frame) == 0 &&
 +	    frame.body[0] == QMI_INDICATION && le16dec(frame.body + 1) == 1);
-+	TEST(ath12k_qmi_native_reply(&frame, 7, 9, &txn, &output,
++	TEST(lkpi_qmi_reply(&frame, 7, 9, &txn, &output,
 +	    sizeof(output)) == -EPROTO);
 +	frame_packet[32] = 0;
-+	TEST(ath12k_qmi_native_frame_decode(frame_packet, 116, &frame) == -EPROTO);
++	TEST(lkpi_qrtr_frame_decode(frame_packet, 116, &frame) == -EPROTO);
 +	frame_packet[32] = 2;
 +	le16enc(frame_packet + 33, txn.id);
 +	le16enc(frame_packet + 35, txn.message);
-+	TEST(ath12k_qmi_native_frame_decode(frame_packet, 116, &frame) == 0);
++	TEST(lkpi_qrtr_frame_decode(frame_packet, 116, &frame) == 0);
 +	output = saved;
-+	TEST(ath12k_qmi_native_reply(&frame, 8, 9, &txn, &output,
++	TEST(lkpi_qmi_reply(&frame, 8, 9, &txn, &output,
 +	    sizeof(output)) == -EPROTO);
-+	TEST(ath12k_qmi_native_reply(&frame, 7, 10, &txn, &output,
++	TEST(lkpi_qmi_reply(&frame, 7, 10, &txn, &output,
 +	    sizeof(output)) == -EPROTO);
 +	txn.id++;
-+	TEST(ath12k_qmi_native_reply(&frame, 7, 9, &txn, &output,
++	TEST(lkpi_qmi_reply(&frame, 7, 9, &txn, &output,
 +	    sizeof(output)) == -ENOENT);
 +	txn.id--;
 +	txn.message++;
-+	TEST(ath12k_qmi_native_reply(&frame, 7, 9, &txn, &output,
++	TEST(lkpi_qmi_reply(&frame, 7, 9, &txn, &output,
 +	    sizeof(output)) == -ENOENT);
 +	txn.message--;
 +	txn.active = false;
-+	TEST(ath12k_qmi_native_reply(&frame, 7, 9, &txn, &output,
++	TEST(lkpi_qmi_reply(&frame, 7, 9, &txn, &output,
 +	    sizeof(output)) == -ENOENT);
 +	txn.active = true;
 +	TEST(memcmp(&output, &saved, sizeof(output)) == 0);
-+	TEST(ath12k_qmi_native_frame_decode(frame_packet, 115, &frame) == -EPROTO);
-+	TEST(ath12k_qmi_native_frame_decode(frame_packet, 113, &frame) == 0);
++	TEST(lkpi_qrtr_frame_decode(frame_packet, 115, &frame) == -EPROTO);
++	TEST(lkpi_qrtr_frame_decode(frame_packet, 113, &frame) == 0);
 +	le32enc(frame_packet + 28, 0x4001);
-+	TEST(ath12k_qmi_native_frame_decode(frame_packet, 116, &frame) == -EPROTO);
++	TEST(lkpi_qrtr_frame_decode(frame_packet, 116, &frame) == -EPROTO);
 +	le32enc(frame_packet + 28, 0x4000);
 +	memcpy(copy, frame_packet + 32, length + 7);
 +	memset(frame_packet, 0, sizeof(frame_packet));
@@ -7155,42 +7155,42 @@ index 00000000000..bbe390d0cfe
 +	le16enc(frame_packet + 12, 1);
 +	le16enc(frame_packet + 14, 0x4000);
 +	memcpy(frame_packet + 16, copy, length + 7);
-+	TEST(ath12k_qmi_native_frame_decode(frame_packet, 100, &frame) == 0 &&
++	TEST(lkpi_qrtr_frame_decode(frame_packet, 100, &frame) == 0 &&
 +	    frame.confirm == 1);
-+	TEST(ath12k_qmi_native_reply(&frame, 7, 9, &txn, &output,
++	TEST(lkpi_qmi_reply(&frame, 7, 9, &txn, &output,
 +	    sizeof(output)) == 0);
 +	frame_packet[3] = 4;
-+	TEST(ath12k_qmi_native_frame_decode(frame_packet, 100, &frame) ==
++	TEST(lkpi_qrtr_frame_decode(frame_packet, 100, &frame) ==
 +	    -EPROTONOSUPPORT);
-+	TEST(ath12k_qmi_native_encode(list_ei, &list, packet, sizeof(packet),
++	TEST(lkpi_qmi_encode(list_ei, &list, packet, sizeof(packet),
 +	    &length) == 0 && length == 36 && packet[3] == 2);
-+	TEST(ath12k_qmi_native_decode(list_ei, packet, length, &decoded_list,
++	TEST(lkpi_qmi_decode(list_ei, packet, length, &decoded_list,
 +	    sizeof(decoded_list)) == 0 && decoded_list.length == 2 &&
 +	    decoded_list.memory[1].size == 8192);
 +	packet[3] = 3;
-+	TEST(ath12k_qmi_native_decode(list_ei, packet, length, &decoded_list,
++	TEST(lkpi_qmi_decode(list_ei, packet, length, &decoded_list,
 +	    sizeof(decoded_list)) != 0);
 +	list.length = 3;
-+	TEST(ath12k_qmi_native_encode(list_ei, &list, packet, sizeof(packet),
++	TEST(lkpi_qmi_encode(list_ei, &list, packet, sizeof(packet),
 +	    &length) != 0);
-+	TEST(ath12k_qmi_native_encode(version_response_ei, &version, packet,
++	TEST(lkpi_qmi_encode(version_response_ei, &version, packet,
 +	    sizeof(packet), &length) == 0);
 +	TEST(length == 14 && packet[7] == 6);
-+	TEST(ath12k_qmi_native_decode(version_response_ei, packet, length,
++	TEST(lkpi_qmi_decode(version_response_ei, packet, length,
 +	    &decoded_version, sizeof(decoded_version)) == 0 &&
 +	    strcmp(decoded_version.version.timestamp, "native") == 0);
 +	packet[7] = 8;
-+	TEST(ath12k_qmi_native_decode(version_response_ei, packet, length,
++	TEST(lkpi_qmi_decode(version_response_ei, packet, length,
 +	    &decoded_version, sizeof(decoded_version)) != 0);
-+	printf("qmi_native_test: schema/CMEM, bounded frames, source/transaction matching and cancellation passed\n");
++	printf("qmi_codec_test: schema/CMEM, bounded frames, source/transaction matching and cancellation passed\n");
 +	return (0);
 +}
 diff --git a/sys/tests/linuxkpi_wlan/regulatory_production_test.py b/sys/tests/linuxkpi_wlan/regulatory_production_test.py
 new file mode 100644
-index 00000000000..c38d66961ee
+index 00000000000..3be2c7d23f4
 --- /dev/null
 +++ b/sys/tests/linuxkpi_wlan/regulatory_production_test.py
-@@ -0,0 +1,369 @@
+@@ -0,0 +1,391 @@
 +#!/usr/bin/env python3
 +"""Hardware-free tests of extracted production regulatory C functions.
 +
@@ -7257,6 +7257,7 @@ index 00000000000..c38d66961ee
 +#define ENODATA ECONNREFUSED
 +#endif
 +#define BIT(n) (1U << (n))
++#define nitems(x) (sizeof(x) / sizeof((x)[0]))
 +#define min(a,b) ((a) < (b) ? (a) : (b))
 +#define max(a,b) ((a) > (b) ? (a) : (b))
 +#define min_t(t,a,b) min((t)(a), (t)(b))
@@ -7397,8 +7398,17 @@ index 00000000000..c38d66961ee
 +        .freq_range = {2402000, 5900000}, .max_tx_power = 30};
 +
 +    CHECK(ath12k_reg_prepare_rule(&raw, 20, 40, 0, &rule) == 0);
-+    CHECK(rule.freq_range.max_bandwidth_khz == 20000 &&
++    CHECK(rule.freq_range.max_bandwidth_khz == 40000 &&
++        !(rule.flags & (NL80211_RRF_NO_HT40 | NL80211_RRF_NO_80MHZ)) &&
++        (rule.flags & NL80211_RRF_NO_160MHZ) &&
 +        rule.power_rule.max_eirp == 2000 && rule.power_rule.max_antenna_gain == 300);
++    raw.max_bw = 160;
++    CHECK(ath12k_reg_prepare_rule(&raw, 20, 160, 0, &rule) == 0 &&
++        rule.freq_range.max_bandwidth_khz == 80000);
++    raw.max_bw = 40;
++    raw.flags = REGULATORY_CHAN_NO_80MHZ;
++    CHECK(ath12k_reg_prepare_rule(&raw, 20, 40, 0, &rule) == 0 &&
++        (rule.flags & NL80211_RRF_NO_80MHZ) && !(rule.flags & NL80211_RRF_NO_HT40));
 +    raw.flags = REGULATORY_CHAN_DISABLED;
 +    CHECK(ath12k_reg_prepare_rule(&raw, 20, 40, 0, &rule) == 0 &&
 +        (rule.flags & NL80211_RRF_NO_IR));
@@ -7437,17 +7447,28 @@ index 00000000000..c38d66961ee
 +    CHECK(ath12k_reg_prepare_rule(&raw, 20, 40, 0, &domain->reg_rules[0]) == 0);
 +    domain->reg_rules[0].power_rule.max_eirp = 1999;
 +    rules[1] = raw; rules[1].start_freq = 5170; rules[1].end_freq = 5250;
-+    rules[1].reg_power = 23;
++    rules[1].reg_power = 23; rules[1].max_bw = 80;
 +    CHECK(ath12k_reg_prepare_rule(&rules[1], 20, 80, 0, &domain->reg_rules[1]) == 0);
 +    CHECK(lkpi_regulatory_channel(domain, &channel, &eligible[0]) == 0);
 +    channel.band = NL80211_BAND_5GHZ; channel.center_freq = 5180;
 +    CHECK(lkpi_regulatory_channel(domain, &channel, &eligible[1]) == 0);
++    CHECK((eligible[0].flags & IEEE80211_CHAN_NO_HT40) == IEEE80211_CHAN_NO_HT40 &&
++        (eligible[0].flags & IEEE80211_CHAN_NO_80MHZ));
++    CHECK(!(eligible[1].flags & (IEEE80211_CHAN_NO_HT40PLUS | IEEE80211_CHAN_NO_80MHZ)) &&
++        (eligible[1].flags & IEEE80211_CHAN_NO_HT40MINUS) &&
++        (eligible[1].flags & IEEE80211_CHAN_NO_160MHZ));
++    CHECK(ath12k_reg_prepare_channel(&eligible[1], 0, 30, &wire) == 0 &&
++        wire.phy_mode == MODE_11NA_HT20 && wire.allow_vht && !wire.allow_he);
++    channel = eligible[0]; channel.flags &= ~IEEE80211_CHAN_NO_HT40;
++    CHECK(ath12k_reg_prepare_channel(&channel, 0, 30, &wire) == -EOPNOTSUPP);
++    channel = eligible[1]; channel.flags &= ~IEEE80211_CHAN_NO_160MHZ;
++    CHECK(ath12k_reg_prepare_channel(&channel, 0, 30, &wire) == -EOPNOTSUPP);
 +    CHECK(ath12k_reg_prepare_channel(&eligible[0], 0, 30, &wire) == 0 &&
 +        wire.maxpower == 38 && wire.antennamax == 6 && !wire.allow_he);
 +    CHECK(ath12k_reg_prepare_channel(&eligible[0], 20, 30, &wire) == -ERANGE);
 +    CHECK(ath12k_reg_prepare_channel(&eligible[0], 0, 18, &wire) == -ERANGE);
 +    channel = eligible[0]; channel.flags |= IEEE80211_CHAN_NO_IR;
-+    CHECK(ath12k_reg_prepare_channel(&channel, 0, 30, &wire) == -EOPNOTSUPP);
++    CHECK(ath12k_reg_prepare_channel(&channel, 0, 30, &wire) == 0 && wire.is_chan_passive);
 +    for (int i = 0; i < 2; i++) {
 +        bands[i].channels = &eligible[i]; bands[i].n_channels = 1;
 +        wiphy.bands[i] = &bands[i]; ar.mac.sbands[i] = bands[i];
@@ -7535,7 +7556,8 @@ index 00000000000..c38d66961ee
 +    bodies = [function(glue, name) for name in (
 +        "lkpi_reg_tx_allowed", "linuxkpi_regulatory_tx_permitted",
 +        "linuxkpi_regulatory_revoke", "linuxkpi_regulatory_tx_pending",
-+        "linuxkpi_regulatory_set_tx_ready", "lkpi_regulatory_channel",
++        "linuxkpi_regulatory_set_tx_ready", "lkpi_regulatory_span",
++        "lkpi_regulatory_channel",
 +    )]
 +    bodies.extend(function(reg, name) for name in (
 +        "ath12k_map_fw_dfs_region", "ath12k_map_fw_reg_flags",
@@ -7562,10 +7584,10 @@ index 00000000000..c38d66961ee
 +    main()
 diff --git a/sys/tests/linuxkpi_wlan/regulatory_test.c b/sys/tests/linuxkpi_wlan/regulatory_test.c
 new file mode 100644
-index 00000000000..ed64db8e4fe
+index 00000000000..e2590724a5d
 --- /dev/null
 +++ b/sys/tests/linuxkpi_wlan/regulatory_test.c
-@@ -0,0 +1,219 @@
+@@ -0,0 +1,288 @@
 +/*-
 + * SPDX-License-Identifier: BSD-2-Clause
 + */
@@ -7656,14 +7678,22 @@ index 00000000000..ed64db8e4fe
 +	    output.max_power == 13);
 +	regd->reg_rules[1].freq_range.start_freq_khz = 2415000;
 +	regd->reg_rules[1].flags = NL80211_RRF_NO_IR;
-+	REG_CHECK(lkpi_regulatory_channel(regd, &input, &output) ==
-+	    -EOPNOTSUPP && (output.flags & IEEE80211_CHAN_DISABLED));
++	/* An overlapping no-IR rule makes the channel passive, not disabled. */
++	REG_CHECK(lkpi_regulatory_channel(regd, &input, &output) == 0 &&
++	    (output.flags & IEEE80211_CHAN_NO_IR) &&
++	    (output.flags & (IEEE80211_CHAN_DISABLED |
++	    IEEE80211_CHAN_RADAR)) == 0);
 +
 +	regd->n_reg_rules = 1;
 +	regd->reg_rules[0].flags = NL80211_RRF_DFS;
-+	REG_CHECK(lkpi_regulatory_channel(regd, &input, &output) == -EOPNOTSUPP);
++	REG_CHECK(lkpi_regulatory_channel(regd, &input, &output) == 0 &&
++	    (output.flags & (IEEE80211_CHAN_NO_IR | IEEE80211_CHAN_RADAR)) ==
++	    (IEEE80211_CHAN_NO_IR | IEEE80211_CHAN_RADAR) &&
++	    (output.flags & IEEE80211_CHAN_DISABLED) == 0);
 +	regd->reg_rules[0].flags = NL80211_RRF_NO_OUTDOOR;
-+	REG_CHECK(lkpi_regulatory_channel(regd, &input, &output) == -EOPNOTSUPP);
++	REG_CHECK(lkpi_regulatory_channel(regd, &input, &output) == 0 &&
++	    (output.flags & (IEEE80211_CHAN_DISABLED | IEEE80211_CHAN_NO_IR)) ==
++	    0);
 +	regd->reg_rules[0].flags = NL80211_RRF_PSD;
 +	REG_CHECK(lkpi_regulatory_channel(regd, &input, &output) == -EOPNOTSUPP);
 +	regd->reg_rules[0].flags = 0;
@@ -7687,8 +7717,69 @@ index 00000000000..ed64db8e4fe
 +	input.center_freq = 5180;
 +	REG_CHECK(lkpi_regulatory_channel(regd, &input, &output) == 0 &&
 +	    output.max_power == 23);
++	/* 5180 is the lower half of 36/40: HT40+ only. */
++	REG_CHECK((output.flags & (IEEE80211_CHAN_NO_HT40PLUS |
++	    IEEE80211_CHAN_NO_80MHZ)) == 0 &&
++	    (output.flags & IEEE80211_CHAN_NO_HT40MINUS) &&
++	    (output.flags & IEEE80211_CHAN_NO_160MHZ));
++	/* 5240 is the upper half of 44/48: HT40- only. */
 +	input.center_freq = 5240;
 +	REG_CHECK(lkpi_regulatory_channel(regd, &input, &output) == 0);
++	REG_CHECK((output.flags & (IEEE80211_CHAN_NO_HT40MINUS |
++	    IEEE80211_CHAN_NO_80MHZ)) == 0 &&
++	    (output.flags & IEEE80211_CHAN_NO_HT40PLUS) &&
++	    (output.flags & IEEE80211_CHAN_NO_160MHZ));
++	regd->reg_rules[0].freq_range.max_bandwidth_khz = 40000;
++	REG_CHECK(lkpi_regulatory_channel(regd, &input, &output) == 0 &&
++	    (output.flags & IEEE80211_CHAN_NO_HT40MINUS) == 0 &&
++	    (output.flags & IEEE80211_CHAN_NO_80MHZ));
++	regd->reg_rules[0].freq_range.max_bandwidth_khz = 80000;
++	regd->reg_rules[0].flags = NL80211_RRF_NO_80MHZ;
++	REG_CHECK(lkpi_regulatory_channel(regd, &input, &output) == 0 &&
++	    (output.flags & IEEE80211_CHAN_NO_HT40MINUS) == 0 &&
++	    (output.flags & IEEE80211_CHAN_NO_80MHZ));
++	regd->reg_rules[0].flags = 0;
++	/* Driver-forbidden aligned direction is preserved and blocks 80. */
++	input.flags = IEEE80211_CHAN_NO_HT40MINUS;
++	REG_CHECK(lkpi_regulatory_channel(regd, &input, &output) == 0 &&
++	    (output.flags & IEEE80211_CHAN_NO_HT40) == IEEE80211_CHAN_NO_HT40 &&
++	    (output.flags & IEEE80211_CHAN_NO_80MHZ));
++	input.flags = 0;
++	/* 5170-5230: the 36/40 pair fits, 44/48 and the 80 MHz block do not. */
++	regd->reg_rules[0].freq_range.end_freq_khz = 5230000;
++	input.center_freq = 5180;
++	REG_CHECK(lkpi_regulatory_channel(regd, &input, &output) == 0 &&
++	    (output.flags & IEEE80211_CHAN_NO_HT40PLUS) == 0 &&
++	    (output.flags & IEEE80211_CHAN_NO_HT40MINUS) &&
++	    (output.flags & IEEE80211_CHAN_NO_80MHZ));
++	input.center_freq = 5220;
++	REG_CHECK(lkpi_regulatory_channel(regd, &input, &output) == 0 &&
++	    (output.flags & IEEE80211_CHAN_NO_HT40) == IEEE80211_CHAN_NO_HT40 &&
++	    (output.flags & IEEE80211_CHAN_NO_80MHZ));
++	regd->reg_rules[0].freq_range.end_freq_khz = 5250000;
++
++	/* Overlapping sibling rules must not be stricter than the primary. */
++	regd->n_reg_rules = 2;
++	input.center_freq = 5180;
++	regd->reg_rules[1] = (struct ieee80211_reg_rule)
++	    REG_RULE(5210, 5250, 20, 3, 23, 0);
++	REG_CHECK(lkpi_regulatory_channel(regd, &input, &output) == 0 &&
++	    (output.flags & IEEE80211_CHAN_NO_HT40PLUS) == 0 &&
++	    (output.flags & IEEE80211_CHAN_NO_80MHZ));
++	regd->reg_rules[1] = (struct ieee80211_reg_rule)
++	    REG_RULE(5190, 5210, 80, 3, 17, 0);
++	REG_CHECK(lkpi_regulatory_channel(regd, &input, &output) == 0 &&
++	    (output.flags & IEEE80211_CHAN_NO_HT40) == IEEE80211_CHAN_NO_HT40 &&
++	    (output.flags & IEEE80211_CHAN_NO_80MHZ) &&
++	    output.max_power == 23);
++	regd->reg_rules[1] = (struct ieee80211_reg_rule)
++	    REG_RULE(5230, 5250, 80, 3, 23, NL80211_RRF_DFS);
++	REG_CHECK(lkpi_regulatory_channel(regd, &input, &output) == 0 &&
++	    (output.flags & IEEE80211_CHAN_NO_HT40PLUS) == 0 &&
++	    (output.flags & IEEE80211_CHAN_NO_80MHZ));
++	regd->n_reg_rules = 1;
++
++	regd->reg_rules[0].freq_range.end_freq_khz = 5250000;
 +	input.center_freq = 5245;
 +	REG_CHECK(lkpi_regulatory_channel(regd, &input, &output) == -ERANGE);
 +	input.band = NL80211_BAND_2GHZ;

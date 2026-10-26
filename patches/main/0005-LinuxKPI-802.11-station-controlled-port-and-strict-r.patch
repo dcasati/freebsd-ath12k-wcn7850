@@ -1,4 +1,4 @@
-From af5ae0c74468d89604e2bdf71f0bd23b48864467 Mon Sep 17 00:00:00 2001
+From b519b3a853b07f522dbdf959e7cc496668a47390 Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 14:44:30 -0600
 Subject: [PATCH 5/7] LinuxKPI: 802.11 station controlled port and strict
@@ -11,6 +11,11 @@ Subject: [PATCH 5/7] LinuxKPI: 802.11 station controlled port and strict
   channel list is rebuilt from the driver's regd, and TX is revoked if
   it cannot be applied.  NO_IR, DFS and indoor channels are kept as
   passive-only rather than dropped.
+- Under strict regulatory, 5 GHz channels allow HT40 in the aligned
+  direction and VHT80 when one rule spans the aligned 40/80 MHz block
+  and no overlapping rule has a narrower bandwidth, lower EIRP or gain,
+  or a NO_IR/DFS flag the primary channel lacks.  2.4 GHz stays at
+  20 MHz and 160 MHz is never enabled.
 - Add the cfg80211, mac80211 and ieee80211 header pieces ath12k needs.
 - cfg80211_find_vendor_ie() now returns a const pointer, as in Linux;
   adapt ath10k and ath11k.
@@ -22,15 +27,15 @@ Drivers that do not opt in keep their current behaviour.
 Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
 ---
  .../linuxkpi/common/include/linux/ieee80211.h |   23 +-
- .../linuxkpi/common/include/net/cfg80211.h    |  285 +++--
+ .../linuxkpi/common/include/net/cfg80211.h    |  286 ++--
  .../common/include/net/ieee80211_radiotap.h   |   44 +
  .../linuxkpi/common/include/net/mac80211.h    |   82 +-
- sys/compat/linuxkpi/common/src/linux_80211.c  | 1062 ++++++++++++++++-
+ sys/compat/linuxkpi/common/src/linux_80211.c  | 1174 ++++++++++++++++-
  sys/compat/linuxkpi/common/src/linux_80211.h  |   23 +
  .../linuxkpi/common/src/linux_80211_sta.h     |  172 +++
  sys/contrib/dev/athk/ath10k/mac.c             |    7 +-
  sys/contrib/dev/athk/ath11k/mac.c             |    7 +-
- 9 files changed, 1559 insertions(+), 146 deletions(-)
+ 9 files changed, 1671 insertions(+), 147 deletions(-)
  create mode 100644 sys/compat/linuxkpi/common/src/linux_80211_sta.h
 
 diff --git a/sys/compat/linuxkpi/common/include/linux/ieee80211.h b/sys/compat/linuxkpi/common/include/linux/ieee80211.h
@@ -112,7 +117,7 @@ index 3d5c938835f..1be8eec8c1f 100644
  
  enum ieee80211_eid_ext {
 diff --git a/sys/compat/linuxkpi/common/include/net/cfg80211.h b/sys/compat/linuxkpi/common/include/net/cfg80211.h
-index 1538f70b58d..9f7787c5da4 100644
+index 1538f70b58d..6ad2d5f06d3 100644
 --- a/sys/compat/linuxkpi/common/include/net/cfg80211.h
 +++ b/sys/compat/linuxkpi/common/include/net/cfg80211.h
 @@ -154,6 +154,8 @@ struct linuxkpi_ieee80211_channel {
@@ -397,12 +402,13 @@ index 1538f70b58d..9f7787c5da4 100644
  	int					n_vendor_commands;
  	const struct wiphy_vendor_command	*vendor_commands;
  	const struct ieee80211_txrx_stypes	*mgmt_stypes;
-@@ -1320,6 +1396,30 @@ void linuxkpi_wiphy_delayed_work_flush(struct wiphy *,
+@@ -1320,6 +1396,31 @@ void linuxkpi_wiphy_delayed_work_flush(struct wiphy *,
  
  int linuxkpi_regulatory_set_wiphy_regd_sync(struct wiphy *wiphy,
      struct linuxkpi_ieee80211_regdomain *regd);
 +/*
-+ * Initial self-managed 20 MHz 2.4/5 GHz station regulatory support only.
++ * Self-managed 2.4/5 GHz station regulatory support: 20 MHz on 2.4 GHz;
++ * HT40/VHT80 on 5 GHz where a single rule spans the aligned block.
 + * NO_IR, DFS, indoor-only, PSD and unknown restrictions exclude a channel;
 + * no country-only database lookup or running domain replacement is supported.
 + * The driver must submit the exact published channel/power snapshot and its
@@ -428,7 +434,7 @@ index 1538f70b58d..9f7787c5da4 100644
  uint32_t linuxkpi_cfg80211_calculate_bitrate(struct rate_info *);
  uint32_t linuxkpi_ieee80211_channel_to_frequency(uint32_t, enum nl80211_band);
  uint32_t linuxkpi_ieee80211_frequency_to_channel(uint32_t, uint32_t);
-@@ -1641,7 +1741,7 @@ struct element {
+@@ -1641,7 +1742,7 @@ struct element {
  
  static inline const struct element *
  lkpi_cfg80211_find_elem_pattern(enum ieee80211_eid eid,
@@ -437,7 +443,7 @@ index 1538f70b58d..9f7787c5da4 100644
  {
  	const struct element *elem;
  	const uint8_t *p;
-@@ -1676,6 +1776,14 @@ cfg80211_find_elem(enum ieee80211_eid eid, const uint8_t *data, size_t len)
+@@ -1676,6 +1777,14 @@ cfg80211_find_elem(enum ieee80211_eid eid, const uint8_t *data, size_t len)
  	return (lkpi_cfg80211_find_elem_pattern(eid, data, len, NULL, 0));
  }
  
@@ -452,7 +458,7 @@ index 1538f70b58d..9f7787c5da4 100644
  static inline const struct element *
  ieee80211_bss_get_elem(struct cfg80211_bss *bss, uint32_t eid)
  {
-@@ -1692,20 +1800,19 @@ ieee80211_bss_get_ie(struct cfg80211_bss *bss, uint32_t eid)
+@@ -1692,20 +1801,19 @@ ieee80211_bss_get_ie(struct cfg80211_bss *bss, uint32_t eid)
  	return ((const uint8_t *)ieee80211_bss_get_elem(bss, eid));
  }
  
@@ -478,7 +484,7 @@ index 1538f70b58d..9f7787c5da4 100644
  }
  
  static inline uint32_t
-@@ -1732,7 +1839,6 @@ static __inline int
+@@ -1732,7 +1840,6 @@ static __inline int
  regulatory_set_wiphy_regd_sync(struct wiphy *wiphy,
      struct linuxkpi_ieee80211_regdomain *regd)
  {
@@ -486,7 +492,7 @@ index 1538f70b58d..9f7787c5da4 100644
  	return (linuxkpi_regulatory_set_wiphy_regd_sync(wiphy, regd));
  }
  
-@@ -1741,7 +1847,6 @@ regulatory_set_wiphy_regd_sync_rtnl(struct wiphy *wiphy,
+@@ -1741,7 +1848,6 @@ regulatory_set_wiphy_regd_sync_rtnl(struct wiphy *wiphy,
      struct linuxkpi_ieee80211_regdomain *regd)
  {
  
@@ -494,7 +500,7 @@ index 1538f70b58d..9f7787c5da4 100644
  	return (linuxkpi_regulatory_set_wiphy_regd_sync(wiphy, regd));
  }
  
-@@ -1750,18 +1855,16 @@ regulatory_set_wiphy_regd(struct wiphy *wiphy,
+@@ -1750,18 +1856,16 @@ regulatory_set_wiphy_regd(struct wiphy *wiphy,
      struct linuxkpi_ieee80211_regdomain *regd)
  {
  
@@ -522,7 +528,7 @@ index 1538f70b58d..9f7787c5da4 100644
  }
  
  static __inline int
-@@ -1769,19 +1872,17 @@ regulatory_hint(struct wiphy *wiphy, const uint8_t *alpha2)
+@@ -1769,19 +1873,17 @@ regulatory_hint(struct wiphy *wiphy, const uint8_t *alpha2)
  {
  	struct linuxkpi_ieee80211_regdomain *regd;
  
@@ -767,7 +773,7 @@ index 83521c2faba..1dec2e6ca75 100644
  
  /* -------------------------------------------------------------------------- */
 diff --git a/sys/compat/linuxkpi/common/src/linux_80211.c b/sys/compat/linuxkpi/common/src/linux_80211.c
-index cde4b820b4d..f89313ce860 100644
+index cde4b820b4d..a5fd2841790 100644
 --- a/sys/compat/linuxkpi/common/src/linux_80211.c
 +++ b/sys/compat/linuxkpi/common/src/linux_80211.c
 @@ -68,6 +68,7 @@
@@ -1777,17 +1783,54 @@ index cde4b820b4d..f89313ce860 100644
  			if (channels[i].flags & IEEE80211_CHAN_DISABLED) {
  				ic_printf(ic, "%s: Skipping disabled chan "
  				    "[%u/%u/%#x]\n", __func__,
-@@ -7098,6 +7720,9 @@ lkpi_ic_getradiocaps(struct ieee80211com *ic, int maxchan,
+@@ -7097,6 +7719,7 @@ lkpi_ic_getradiocaps(struct ieee80211com *ic, int maxchan,
+ 		for (i = 0; i < nchans && *n < maxchan; i++) {
  			uint32_t nflags = 0;
  			int cflags = chan_flags;
++			int first, k, m;
  
-+			if (hw->wiphy->lkpi_regulatory_strict)
-+				cflags = 0;
-+
  			if (channels[i].flags & IEEE80211_CHAN_DISABLED) {
  				ic_printf(ic, "%s: Skipping disabled chan "
- 				    "[%u/%u/%#x]\n", __func__,
-@@ -7215,6 +7840,7 @@ linuxkpi_ieee80211_alloc_hw(size_t priv_len, const struct ieee80211_ops *ops)
+@@ -7114,14 +7737,37 @@ lkpi_ic_getradiocaps(struct ieee80211com *ic, int maxchan,
+ 			if (channels[i].flags & IEEE80211_CHAN_NO_80MHZ)
+ 				cflags &= ~NET80211_CBW_FLAG_VHT80;
+ 			/* XXX hwo to map the remaining enum ieee80211_channel_flags? */
+-			if (channels[i].flags & IEEE80211_CHAN_NO_HT40)
++			/*
++			 * Strict regulatory clears only the permitted HT40
++			 * direction; drop the other direction below.
++			 */
++			if (hw->wiphy->lkpi_regulatory_strict ?
++			    (channels[i].flags & IEEE80211_CHAN_NO_HT40) ==
++			    IEEE80211_CHAN_NO_HT40 :
++			    (channels[i].flags & IEEE80211_CHAN_NO_HT40) != 0)
+ 				cflags &= ~NET80211_CBW_FLAG_HT40;
+ 
++			first = *n;
+ 			error = ieee80211_add_channel_cbw(c, maxchan, n,
+ 			    ieee80211_mhz2ieee(channels[i].center_freq,
+ 				lkpi_nl80211_band_to_net80211_band(channels[i].band)),
+ 			    channels[i].center_freq, channels[i].max_power,
+ 			    nflags, bands, cflags);
++			/* net80211 adds both HT40 directions unconditionally. */
++			for (k = m = first; k < *n; k++) {
++				if (hw->wiphy->lkpi_regulatory_strict &&
++				    ((IEEE80211_IS_CHAN_HT40U(&c[k]) &&
++				    (channels[i].flags &
++				    IEEE80211_CHAN_NO_HT40PLUS) != 0) ||
++				    (IEEE80211_IS_CHAN_HT40D(&c[k]) &&
++				    (channels[i].flags &
++				    IEEE80211_CHAN_NO_HT40MINUS) != 0)))
++					continue;
++				if (m != k)
++					c[m] = c[k];
++				m++;
++			}
++			*n = m;
+ 			/* net80211::ENOBUFS: *n >= maxchans */
+ 			if (error != 0 && error != ENOBUFS)
+ 				ic_printf(ic, "%s: Adding chan %u/%u/%#x/%#x/%#x/%#x "
+@@ -7215,6 +7861,7 @@ linuxkpi_ieee80211_alloc_hw(size_t priv_len, const struct ieee80211_ops *ops)
  	LKPI_80211_LHW_SCAN_LOCK_INIT(lhw);
  	LKPI_80211_LHW_TXQ_LOCK_INIT(lhw);
  	spin_lock_init(&lhw->txq_lock);
@@ -1795,7 +1838,7 @@ index cde4b820b4d..f89313ce860 100644
  	sx_init_flags(&lhw->lvif_sx, "lhw-lvif", SX_RECURSE | SX_DUPOK);
  	LKPI_80211_LHW_MC_LOCK_INIT(lhw);
  	TAILQ_INIT(&lhw->lvif_head);
-@@ -7416,10 +8042,12 @@ linuxkpi_ieee80211_ifattach(struct ieee80211_hw *hw)
+@@ -7416,10 +8063,12 @@ linuxkpi_ieee80211_ifattach(struct ieee80211_hw *hw)
  {
  	struct ieee80211com *ic;
  	struct lkpi_hw *lhw;
@@ -1808,7 +1851,7 @@ index cde4b820b4d..f89313ce860 100644
  
  	/* We do it this late as wiphy->dev should be set for the name. */
  	lhw->workq = alloc_ordered_workqueue(wiphy_name(hw->wiphy), 0);
-@@ -7505,7 +8133,7 @@ linuxkpi_ieee80211_ifattach(struct ieee80211_hw *hw)
+@@ -7505,7 +8154,7 @@ linuxkpi_ieee80211_ifattach(struct ieee80211_hw *hw)
  
  	ic->ic_cryptocaps = 0;
  #ifdef LKPI_80211_HW_CRYPTO
@@ -1817,7 +1860,7 @@ index cde4b820b4d..f89313ce860 100644
  		uint32_t hwciphers;
  
  		hwciphers = 0;
-@@ -7548,10 +8176,13 @@ linuxkpi_ieee80211_ifattach(struct ieee80211_hw *hw)
+@@ -7548,10 +8197,13 @@ linuxkpi_ieee80211_ifattach(struct ieee80211_hw *hw)
  	}
  #endif
  
@@ -1831,7 +1874,7 @@ index cde4b820b4d..f89313ce860 100644
  
  	ic->ic_update_mcast = lkpi_ic_update_mcast;
  	ic->ic_update_promisc = lkpi_ic_update_promisc;
-@@ -7565,6 +8196,7 @@ linuxkpi_ieee80211_ifattach(struct ieee80211_hw *hw)
+@@ -7565,6 +8217,7 @@ linuxkpi_ieee80211_ifattach(struct ieee80211_hw *hw)
  	ic->ic_vap_create = lkpi_ic_vap_create;
  	ic->ic_vap_delete = lkpi_ic_vap_delete;
  	ic->ic_getradiocaps = lkpi_ic_getradiocaps;
@@ -1839,7 +1882,7 @@ index cde4b820b4d..f89313ce860 100644
  	ic->ic_wme.wme_update = lkpi_ic_wme_update;
  
  	lhw->ic_scan_curchan = ic->ic_scan_curchan;
-@@ -7726,6 +8358,7 @@ linuxkpi_ieee80211_ifdetach(struct ieee80211_hw *hw)
+@@ -7726,6 +8379,7 @@ linuxkpi_ieee80211_ifdetach(struct ieee80211_hw *hw)
  
  	lhw = HW_TO_LHW(hw);
  	ic = lhw->ic;
@@ -1847,7 +1890,7 @@ index cde4b820b4d..f89313ce860 100644
  	ieee80211_ifdetach(ic);
  }
  
-@@ -7921,32 +8554,285 @@ lkpi_get_linuxkpi_ieee80211_regdomain(size_t n)
+@@ -7921,32 +8575,374 @@ lkpi_get_linuxkpi_ieee80211_regdomain(size_t n)
  {
  	struct linuxkpi_ieee80211_regdomain *regd;
  
@@ -1858,6 +1901,51 @@ index cde4b820b4d..f89313ce860 100644
  	return (regd);
  }
  
++/*
++ * True when one rule spans [start, start + width) MHz and every rule
++ * overlapping that span permits the whole width (no no_flag, max bandwidth
++ * >= width), allows no less power or antenna gain than the primary channel,
++ * and adds no NO_IR/DFS restriction the primary channel lacks.
++ * AUTO_BW stitching is not implemented.
++ */
++static bool
++lkpi_regulatory_span(const struct linuxkpi_ieee80211_regdomain *regd,
++    u_int start, u_int width, uint32_t no_flag, int power, int gain,
++    uint32_t primary_rrf)
++{
++	const struct ieee80211_reg_rule *rule;
++	int64_t low, high;
++	bool spanned;
++	int i;
++
++	low = (int64_t)start * 1000;
++	high = low + (int64_t)width * 1000;
++	spanned = false;
++	for (i = 0; i < regd->n_reg_rules; i++) {
++		rule = &regd->reg_rules[i];
++		if (rule->freq_range.end_freq_khz <= low ||
++		    rule->freq_range.start_freq_khz >= high)
++			continue;
++		if ((rule->flags & no_flag) != 0 ||
++		    (rule->flags & ~(NL80211_RRF_AUTO_BW |
++		    NL80211_RRF_NO_HT40 | NL80211_RRF_NO_80MHZ |
++		    NL80211_RRF_NO_160MHZ | NL80211_RRF_NO_HE |
++		    NL80211_RRF_NO_EHT | NL80211_RRF_NO_320MHZ |
++		    NL80211_RRF_NO_IR | NL80211_RRF_DFS |
++		    NL80211_RRF_NO_OUTDOOR)) != 0 ||
++		    (rule->flags & (NL80211_RRF_NO_IR | NL80211_RRF_DFS) &
++		    ~primary_rrf) != 0 ||
++		    rule->freq_range.max_bandwidth_khz < high - low ||
++		    rule->power_rule.max_eirp / 100 < power ||
++		    rule->power_rule.max_antenna_gain / 100 < gain)
++			return (false);
++		if (rule->freq_range.start_freq_khz <= low &&
++		    rule->freq_range.end_freq_khz >= high)
++			spanned = true;
++	}
++	return (spanned);
++}
++
 +/*
 + * Deliberately do not implement AUTO_BW stitching, DFS/CAC, beacon hints,
 + * indoor location or PSD.  A single rule must contain the entire occupied
@@ -1871,7 +1959,7 @@ index cde4b820b4d..f89313ce860 100644
 +{
 +	const struct ieee80211_reg_rule *rule;
 +	int64_t low, high;
-+	uint32_t restrict_flags;
++	uint32_t primary_rrf, restrict_flags;
 +	int i, power, gain;
 +	bool covered, prohibited;
 +
@@ -1890,7 +1978,7 @@ index cde4b820b4d..f89313ce860 100644
 +	high = (int64_t)in->center_freq * 1000 + 10000;
 +	power = in->max_power;
 +	gain = 63;
-+	restrict_flags = 0;
++	primary_rrf = restrict_flags = 0;
 +	covered = prohibited = false;
 +	for (i = 0; i < regd->n_reg_rules; i++) {
 +		rule = &regd->reg_rules[i];
@@ -1909,6 +1997,8 @@ index cde4b820b4d..f89313ce860 100644
 +		 * LinuxKPI only offers station/monitor modes, so no-IR and
 +		 * radar channels stay usable as passive (listen-first) ones.
 +		 */
++		primary_rrf |= rule->flags &
++		    (NL80211_RRF_NO_IR | NL80211_RRF_DFS);
 +		if (rule->flags & NL80211_RRF_NO_IR)
 +			restrict_flags |= IEEE80211_CHAN_NO_IR;
 +		if (rule->flags & NL80211_RRF_DFS)
@@ -1930,6 +2020,48 @@ index cde4b820b4d..f89313ce860 100644
 +	    IEEE80211_CHAN_NO_EHT | IEEE80211_CHAN_NO_IR |
 +	    IEEE80211_CHAN_RADAR)) != 0)
 +		return (-EOPNOTSUPP);
++
++	/*
++	 * 2.4 GHz and 160 MHz stay 20 MHz only.  On 5 GHz, permit HT40 only
++	 * towards the other half of the aligned 40 MHz pair, and VHT80 only
++	 * when that HT40 direction is permitted too.  Each wider span must be
++	 * fully covered by one rule and no overlapping rule may be stricter
++	 * than the primary channel.  Width flags the driver already set on the
++	 * input channel are preserved.
++	 */
++	if (in->band == NL80211_BAND_5GHZ) {
++		/* Lower edges of the 5 GHz 80 MHz blocks, in MHz. */
++		static const u_int blocks[] = {
++			5170, 5250, 5490, 5570, 5650, 5735,
++		};
++		uint32_t allow, dir;
++		u_int b, start;
++
++		allow = 0;
++		dir = IEEE80211_CHAN_NO_HT40PLUS;
++		for (b = 0; b < nitems(blocks); b++) {
++			start = blocks[b];
++			if (in->center_freq < start ||
++			    in->center_freq >= start + 80)
++				continue;
++			if (in->center_freq >= start + 40)
++				start += 40;
++			if (in->center_freq >= start + 20)
++				dir = IEEE80211_CHAN_NO_HT40MINUS;
++			if (!lkpi_regulatory_span(regd, start, 40,
++			    NL80211_RRF_NO_HT40, power, gain, primary_rrf))
++				break;
++			allow |= dir;
++			if (lkpi_regulatory_span(regd, blocks[b], 80,
++			    NL80211_RRF_NO_80MHZ, power, gain, primary_rrf))
++				allow |= IEEE80211_CHAN_NO_80MHZ;
++			break;
++		}
++		out->flags &= ~(allow & ~in->flags);
++		/* VHT80 requires the aligned HT40 direction. */
++		if (out->flags & dir)
++			out->flags |= IEEE80211_CHAN_NO_80MHZ;
++	}
 +
 +	out->flags &= ~IEEE80211_CHAN_DISABLED;
 +	out->flags |= restrict_flags;
@@ -2142,7 +2274,7 @@ index cde4b820b4d..f89313ce860 100644
  }
  
  void
-@@ -8425,6 +9311,39 @@ linuxkpi_ieee80211_rx(struct ieee80211_hw *hw, struct sk_buff *skb,
+@@ -8425,6 +9421,39 @@ linuxkpi_ieee80211_rx(struct ieee80211_hw *hw, struct sk_buff *skb,
  	}
  
  	rssi = 0;
@@ -2182,7 +2314,7 @@ index cde4b820b4d..f89313ce860 100644
  	lkpi_convert_rx_status(hw, lsta, rx_status, &rx_stats, &rssi);
  
  	ok = ieee80211_add_rx_params(m, &rx_stats);
-@@ -8744,6 +9663,7 @@ linuxkpi_wiphy_new(const struct cfg80211_ops *ops, size_t priv_len)
+@@ -8744,6 +9773,7 @@ linuxkpi_wiphy_new(const struct cfg80211_ops *ops, size_t priv_len)
  
  	wiphy = LWIPHY_TO_WIPHY(lwiphy);
  
@@ -2190,7 +2322,7 @@ index cde4b820b4d..f89313ce860 100644
  	INIT_LIST_HEAD(&wiphy->wdev_list);
  	mutex_init(&wiphy->mtx);
  	TODO();
-@@ -8763,6 +9683,10 @@ linuxkpi_wiphy_free(struct wiphy *wiphy)
+@@ -8763,6 +9793,10 @@ linuxkpi_wiphy_free(struct wiphy *wiphy)
  	mutex_destroy(&wiphy->mtx);
  
  	lwiphy = WIPHY_TO_LWIPHY(wiphy);
@@ -2201,7 +2333,7 @@ index cde4b820b4d..f89313ce860 100644
  	LKPI_80211_LWIPHY_WORK_LOCK_DESTROY(lwiphy);
  
  	kfree(lwiphy);
-@@ -9088,6 +10012,8 @@ linuxkpi_ieee80211_tx_dequeue(struct ieee80211_hw *hw,
+@@ -9088,6 +10122,8 @@ linuxkpi_ieee80211_tx_dequeue(struct ieee80211_hw *hw,
  	struct sk_buff *skb;
  
  	IMPROVE("wiphy_lock? or assert?");
@@ -2210,7 +2342,7 @@ index cde4b820b4d..f89313ce860 100644
  	skb = NULL;
  	ltxq = TXQ_TO_LTXQ(txq);
  	ltxq->flags |= LKPI_TXQ_SEEN_DEQUEUE;
-@@ -9108,6 +10034,11 @@ linuxkpi_ieee80211_tx_dequeue(struct ieee80211_hw *hw,
+@@ -9108,6 +10144,11 @@ linuxkpi_ieee80211_tx_dequeue(struct ieee80211_hw *hw,
  	if (skb != NULL)
  		ltxq->frms_dequeued++;
  	LKPI_80211_LTXQ_UNLOCK(ltxq);
@@ -2222,7 +2354,7 @@ index cde4b820b4d..f89313ce860 100644
  
  stopped:
  	return (skb);
-@@ -9212,6 +10143,26 @@ linuxkpi_ieee80211_tx_status_ext(struct ieee80211_hw *hw,
+@@ -9212,6 +10253,26 @@ linuxkpi_ieee80211_tx_status_ext(struct ieee80211_hw *hw,
  		txs.status = IEEE80211_RATECTL_TX_FAIL_UNSPECIFIED;
  	}
  
@@ -2249,7 +2381,7 @@ index cde4b820b4d..f89313ce860 100644
  	if (ni != NULL) {
  		txs.pktlen = skb->len;
  		txs.flags |= IEEE80211_RATECTL_STATUS_PKTLEN;
-@@ -9503,8 +10454,9 @@ linuxkpi_ieee80211_stop_queue(struct ieee80211_hw *hw, int qnum)
+@@ -9503,8 +10564,9 @@ linuxkpi_ieee80211_stop_queue(struct ieee80211_hw *hw, int qnum)
  	struct ieee80211_vif *vif;
  	int ac_count, ac;
  
@@ -2261,7 +2393,7 @@ index cde4b820b4d..f89313ce860 100644
  
  	lhw = wiphy_priv(hw->wiphy);
  
-@@ -9515,6 +10467,7 @@ linuxkpi_ieee80211_stop_queue(struct ieee80211_hw *hw, int qnum)
+@@ -9515,6 +10577,7 @@ linuxkpi_ieee80211_stop_queue(struct ieee80211_hw *hw, int qnum)
  		ac_count = 1;
  
  	LKPI_80211_LHW_LVIF_LOCK(lhw);
@@ -2269,7 +2401,7 @@ index cde4b820b4d..f89313ce860 100644
  	TAILQ_FOREACH(lvif, &lhw->lvif_head, lvif_entry) {
  
  		vif = LVIF_TO_VIF(lvif);
-@@ -9559,6 +10512,10 @@ lkpi_ieee80211_wake_queues(struct ieee80211_hw *hw, int hwq)
+@@ -9559,6 +10622,10 @@ lkpi_ieee80211_wake_queues(struct ieee80211_hw *hw, int hwq)
  	struct lkpi_sta *lsta;
  	int ac_count, ac, tid;
  
@@ -2280,7 +2412,7 @@ index cde4b820b4d..f89313ce860 100644
  	/* See lkpi_ic_vap_create(). */
  	if (hw->queues >= IEEE80211_NUM_ACS)
  		ac_count = IEEE80211_NUM_ACS;
-@@ -9569,6 +10526,7 @@ lkpi_ieee80211_wake_queues(struct ieee80211_hw *hw, int hwq)
+@@ -9569,6 +10636,7 @@ lkpi_ieee80211_wake_queues(struct ieee80211_hw *hw, int hwq)
  
  	IMPROVE_TXQ("Locking");
  	LKPI_80211_LHW_LVIF_LOCK(lhw);
@@ -2288,7 +2420,7 @@ index cde4b820b4d..f89313ce860 100644
  	TAILQ_FOREACH(lvif, &lhw->lvif_head, lvif_entry) {
  		struct ieee80211_vif *vif;
  
-@@ -9624,6 +10582,19 @@ lkpi_ieee80211_wake_queues(struct ieee80211_hw *hw, int hwq)
+@@ -9624,6 +10692,19 @@ lkpi_ieee80211_wake_queues(struct ieee80211_hw *hw, int hwq)
  	LKPI_80211_LHW_LVIF_UNLOCK(lhw);
  }
  
@@ -2308,7 +2440,7 @@ index cde4b820b4d..f89313ce860 100644
  static void
  lkpi_ieee80211_wake_queues_locked(struct ieee80211_hw *hw)
  {
-@@ -9678,12 +10649,33 @@ linuxkpi_ieee80211_handle_wake_tx_queue(struct ieee80211_hw *hw,
+@@ -9678,12 +10759,33 @@ linuxkpi_ieee80211_handle_wake_tx_queue(struct ieee80211_hw *hw,
  		struct ieee80211_txq *ntxq;
  		struct ieee80211_tx_control control;
  		struct sk_buff *skb;
@@ -2342,7 +2474,7 @@ index cde4b820b4d..f89313ce860 100644
  		memset(&control, 0, sizeof(control));
  		control.sta = ntxq->sta;
  		do {
-@@ -9694,7 +10686,11 @@ linuxkpi_ieee80211_handle_wake_tx_queue(struct ieee80211_hw *hw,
+@@ -9694,7 +10796,11 @@ linuxkpi_ieee80211_handle_wake_tx_queue(struct ieee80211_hw *hw,
  			lkpi_80211_mo_tx(hw, &control, skb);
  		} while(1);
  

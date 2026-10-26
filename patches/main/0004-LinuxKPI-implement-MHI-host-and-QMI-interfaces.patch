@@ -1,20 +1,35 @@
-From 674916f51497216308d92d9fcc689d96202b6a92 Mon Sep 17 00:00:00 2001
+From 7a8cd235dd4f197ea3e9cc779ba5070310ffcc2a Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 14:44:30 -0600
 Subject: [PATCH 4/7] LinuxKPI: implement MHI host and QMI interfaces
 
 Add an MHI host implementation (BHI/BHIe firmware download, channel and
-event rings, M-state handling) and the linux/soc/qcom/qmi.h handle API
-used by ath12k.  The firmware boot sequence follows OpenBSD's qwz(4).
+event rings, M-state handling).  The firmware boot sequence follows
+OpenBSD's qwz(4).
+
+Implement the linux/soc/qcom/qmi.h handle API (linux_qmi.c,
+linux_qmi_codec.c) on top of a minimal QRTR endpoint per MHI
+controller.  The endpoint attaches in mhi_prepare when no raw receive
+consumer is installed, sends HELLO once the IPCR channels are up and
+detaches at unprepare once DMA is released.  Service lookup is global,
+as in Linux.
 
 Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
 ---
  .../linuxkpi/common/include/linux/mhi.h       |   63 +-
- .../common/include/linux/soc/qcom/qmi.h       |   62 +-
- sys/compat/linuxkpi/common/src/linux_mhi.c    | 1691 ++++++++++++++++-
- sys/compat/linuxkpi/common/src/linux_mhi.h    |  179 ++
- 4 files changed, 1952 insertions(+), 43 deletions(-)
+ .../common/include/linux/soc/qcom/qmi.h       |   84 +-
+ sys/compat/linuxkpi/common/src/linux_mhi.c    | 1709 ++++++++++++++++-
+ sys/compat/linuxkpi/common/src/linux_mhi.h    |  180 ++
+ sys/compat/linuxkpi/common/src/linux_qmi.c    |  906 +++++++++
+ sys/compat/linuxkpi/common/src/linux_qmi.h    |   67 +
+ .../linuxkpi/common/src/linux_qmi_codec.c     |  436 +++++
+ sys/conf/files                                |    4 +
+ sys/modules/linuxkpi_wlan/Makefile            |    3 +-
+ 9 files changed, 3396 insertions(+), 56 deletions(-)
  create mode 100644 sys/compat/linuxkpi/common/src/linux_mhi.h
+ create mode 100644 sys/compat/linuxkpi/common/src/linux_qmi.c
+ create mode 100644 sys/compat/linuxkpi/common/src/linux_qmi.h
+ create mode 100644 sys/compat/linuxkpi/common/src/linux_qmi_codec.c
 
 diff --git a/sys/compat/linuxkpi/common/include/linux/mhi.h b/sys/compat/linuxkpi/common/include/linux/mhi.h
 index 24b3205d6f5..ce980d6a22d 100644
@@ -162,7 +177,7 @@ index 24b3205d6f5..ce980d6a22d 100644
  
  #endif	/* _LINUXKPI_LINUX_MHI_H */
 diff --git a/sys/compat/linuxkpi/common/include/linux/soc/qcom/qmi.h b/sys/compat/linuxkpi/common/include/linux/soc/qcom/qmi.h
-index 647eaf271d8..ae40131017e 100644
+index 647eaf271d8..130edab916d 100644
 --- a/sys/compat/linuxkpi/common/include/linux/soc/qcom/qmi.h
 +++ b/sys/compat/linuxkpi/common/include/linux/soc/qcom/qmi.h
 @@ -30,6 +30,7 @@
@@ -173,18 +188,20 @@ index 647eaf271d8..ae40131017e 100644
  #include <linux/qrtr.h>
  
  enum soc_qcom_qmi_data_type {
-@@ -45,8 +46,8 @@ enum soc_qcom_qmi_data_type {
+@@ -45,8 +46,10 @@ enum soc_qcom_qmi_data_type {
  	QMI_STRING,
  };
  
 -#define	QMI_RESULT_SUCCESS_V01	__LINE__
 -#define	QMI_INDICATION		__LINE__
 +#define	QMI_RESULT_SUCCESS_V01	0
++#define	QMI_REQUEST		0
++#define	QMI_RESPONSE		2
 +#define	QMI_INDICATION		4
  
  struct qmi_handle;
  
-@@ -75,6 +76,13 @@ struct qmi_response_type_v01 {
+@@ -75,6 +78,13 @@ struct qmi_response_type_v01 {
  };
  
  struct qmi_txn {
@@ -198,29 +215,38 @@ index 647eaf271d8..ae40131017e 100644
  };
  
  struct qmi_service {
-@@ -100,8 +108,21 @@ struct qmi_handle {
+@@ -100,74 +110,84 @@ struct qmi_handle {
  
  	const struct qmi_msg_handler	*handler;
  	struct qmi_ops			ops;
-+	const struct qmi_native_ops	*native_ops;
-+	void				*native;
++	void				*lkpi;		/* LinuxKPI QRTR client */
  };
  
-+/* A direct, device-owned MHI transport; not a QRTR socket implementation. */
-+struct qmi_native_ops {
-+	int (*lookup)(struct qmi_handle *, uint32_t, uint32_t, uint32_t);
-+	void (*release)(struct qmi_handle *);
-+	int (*send)(struct qmi_handle *, struct qmi_txn *, uint32_t, size_t,
-+	    const struct qmi_elem_info *, const void *);
-+	int (*init)(struct qmi_handle *, struct qmi_txn *,
-+	    const struct qmi_elem_info *, void *);
-+	void (*cancel)(struct qmi_txn *);
-+	int (*wait)(struct qmi_txn *, uint64_t);
-+};
- 
- /* XXX-TODO need implementation somewhere... it is not in ath1xk* */
+-
+-/* XXX-TODO need implementation somewhere... it is not in ath1xk* */
  extern struct qmi_elem_info qmi_response_type_v01_ei[];
-@@ -111,14 +132,8 @@ qmi_handle_init(struct qmi_handle *handle, size_t resp_len_max,
+ 
++int linuxkpi_qmi_handle_init(struct qmi_handle *, size_t,
++    const struct qmi_ops *, const struct qmi_msg_handler *);
++int linuxkpi_qmi_add_lookup(struct qmi_handle *, uint32_t, uint32_t,
++    uint32_t);
++void linuxkpi_qmi_handle_release(struct qmi_handle *);
++int linuxkpi_qmi_send_request(struct qmi_handle *, struct sockaddr_qrtr *,
++    struct qmi_txn *, uint32_t, size_t, const struct qmi_elem_info *,
++    const void *);
++int linuxkpi_qmi_txn_init(struct qmi_handle *, struct qmi_txn *,
++    const struct qmi_elem_info *, void *);
++int linuxkpi_qmi_txn_wait(struct qmi_txn *, unsigned long);
++void linuxkpi_qmi_txn_cancel(struct qmi_txn *);
++/*
++ * FreeBSD extension: cancel the outstanding transaction, unbind from the
++ * server and wait for callbacks to drain.  The handle only binds again to a
++ * server announced by an MHI endpoint brought up after this call.
++ */
++int linuxkpi_qmi_handle_stop(struct qmi_handle *);
++
+ static inline int
+ qmi_handle_init(struct qmi_handle *handle, size_t resp_len_max,
      const struct qmi_ops *ops, const struct qmi_msg_handler *handler)
  {
  
@@ -232,82 +258,83 @@ index 647eaf271d8..ae40131017e 100644
 -	/* XXX TODO */
 -
 -	return (0);
-+	pr_err("%s: QMI transport is not implemented\n", __func__);
-+	return (-EOPNOTSUPP);
++	return (linuxkpi_qmi_handle_init(handle, resp_len_max, ops, handler));
  }
  
- static __inline int
-@@ -126,15 +141,18 @@ qmi_add_lookup(struct qmi_handle *handle, uint32_t service, uint32_t version,
+-static __inline int
++static inline int
+ qmi_add_lookup(struct qmi_handle *handle, uint32_t service, uint32_t version,
      uint32_t service_ins_id)
  {
  
 -	/* XXX TODO */
 -	return (0);
-+	if (handle->native_ops == NULL)
-+		return (-EOPNOTSUPP);
-+	return (handle->native_ops->lookup(handle, service, version,
++	return (linuxkpi_qmi_add_lookup(handle, service, version,
 +	    service_ins_id));
  }
  
- static __inline void
+-static __inline void
++static inline void
  qmi_handle_release(struct qmi_handle *handle)
  {
  
 -	/* XXX TODO */
-+	if (handle->native_ops != NULL)
-+		handle->native_ops->release(handle);
++	linuxkpi_qmi_handle_release(handle);
  }
  
- static __inline int
-@@ -142,15 +160,17 @@ qmi_send_request(struct qmi_handle *handle, void *x, struct qmi_txn *txn,
-     uint32_t msd_id, size_t len, const struct qmi_elem_info *ei, void *req)
+-static __inline int
+-qmi_send_request(struct qmi_handle *handle, void *x, struct qmi_txn *txn,
+-    uint32_t msd_id, size_t len, const struct qmi_elem_info *ei, void *req)
++static inline int
++qmi_send_request(struct qmi_handle *handle, struct sockaddr_qrtr *sq,
++    struct qmi_txn *txn, uint32_t msg_id, size_t len,
++    const struct qmi_elem_info *ei, const void *c_struct)
  {
  
 -	/* XXX TODO */
 -	return (-ENXIO);
-+	if (handle->native_ops == NULL || x != NULL)
-+		return (-EOPNOTSUPP);
-+	return (handle->native_ops->send(handle, txn, msd_id, len, ei, req));
++	return (linuxkpi_qmi_send_request(handle, sq, txn, msg_id, len, ei,
++	    c_struct));
  }
  
- static __inline void
+-static __inline void
++static inline void
  qmi_txn_cancel(struct qmi_txn *txn)
  {
  
 -	/* XXX TODO */
-+	if (txn->handle != NULL && txn->handle->native_ops != NULL)
-+		txn->handle->native_ops->cancel(txn);
++	linuxkpi_qmi_txn_cancel(txn);
  }
  
- static __inline int
-@@ -158,16 +178,18 @@ qmi_txn_init(struct qmi_handle *handle, struct qmi_txn *txn,
-     const struct qmi_elem_info *ei, void *resp)
+-static __inline int
++static inline int
+ qmi_txn_init(struct qmi_handle *handle, struct qmi_txn *txn,
+-    const struct qmi_elem_info *ei, void *resp)
++    const struct qmi_elem_info *ei, void *c_struct)
  {
  
 -	/* XXX TODO */
 -	return (-ENXIO);
-+	if (handle->native_ops == NULL)
-+		return (-EOPNOTSUPP);
-+	return (handle->native_ops->init(handle, txn, ei, resp));
++	return (linuxkpi_qmi_txn_init(handle, txn, ei, c_struct));
  }
  
- static __inline int
- qmi_txn_wait(struct qmi_txn *txn, uint64_t jiffies)
+-static __inline int
+-qmi_txn_wait(struct qmi_txn *txn, uint64_t jiffies)
++static inline int
++qmi_txn_wait(struct qmi_txn *txn, unsigned long timeout)
  {
  
 -	/* XXX TODO */
 -	return (-ENXIO);
-+	if (txn->handle == NULL || txn->handle->native_ops == NULL)
-+		return (-EOPNOTSUPP);
-+	return (txn->handle->native_ops->wait(txn, jiffies));
++	return (linuxkpi_qmi_txn_wait(txn, timeout));
  }
  
  #endif	/* _LINUXKPI_LINUX_SOC_QCOM_QMI_H */
 diff --git a/sys/compat/linuxkpi/common/src/linux_mhi.c b/sys/compat/linuxkpi/common/src/linux_mhi.c
-index 5d3c391f91a..5a75c83457b 100644
+index 5d3c391f91a..09dd140dc2a 100644
 --- a/sys/compat/linuxkpi/common/src/linux_mhi.c
 +++ b/sys/compat/linuxkpi/common/src/linux_mhi.c
-@@ -29,12 +29,1355 @@
+@@ -29,12 +29,1356 @@
  #include <sys/types.h>
  #include <sys/kernel.h>
  #include <sys/malloc.h>
@@ -323,6 +350,7 @@ index 5d3c391f91a..5a75c83457b 100644
  #include <linux/mhi.h>
  
 +#include "linux_mhi.h"
++#include "linux_qmi.h"
 +
  static MALLOC_DEFINE(M_LKPIMHI, "lkpimhi", "LinuxKPI MHI compat");
  
@@ -1663,7 +1691,7 @@ index 5d3c391f91a..5a75c83457b 100644
  struct mhi_controller *
  linuxkpi_mhi_alloc_controller(void)
  {
-@@ -49,7 +1392,20 @@ void
+@@ -49,7 +1393,20 @@ void
  linuxkpi_mhi_free_controller(struct mhi_controller *mhi_ctrl)
  {
  
@@ -1685,7 +1713,7 @@ index 5d3c391f91a..5a75c83457b 100644
  	free(mhi_ctrl, M_LKPIMHI);
  }
  
-@@ -57,8 +1413,11 @@ int
+@@ -57,8 +1414,11 @@ int
  linuxkpi_mhi_register_controller(struct mhi_controller *mhi_ctrl,
      const struct mhi_controller_config *cfg)
  {
@@ -1698,7 +1726,7 @@ index 5d3c391f91a..5a75c83457b 100644
  		return (-EINVAL);
  
  #define	CHECK_FIELD(_f)						\
-@@ -77,13 +1436,337 @@ linuxkpi_mhi_register_controller(struct mhi_controller *mhi_ctrl,
+@@ -77,13 +1437,354 @@ linuxkpi_mhi_register_controller(struct mhi_controller *mhi_ctrl,
  	CHECK_FIELD(write_reg);
  #undef CHECK_FIELD
  
@@ -1785,6 +1813,7 @@ index 5d3c391f91a..5a75c83457b 100644
 +linuxkpi_mhi_prepare(struct mhi_controller *ctrl)
 +{
 +	struct lkpi_mhi_runtime *runtime;
++	bool qrtr = false;
 +	int error;
 +
 +	if (ctrl == NULL || (runtime = ctrl->lkpi_runtime) == NULL)
@@ -1795,9 +1824,19 @@ index 5d3c391f91a..5a75c83457b 100644
 +	    !ctrl->fbc_download || ctrl->sbl_size != LKPI_MHI_BHI_SIZE ||
 +	    ctrl->seg_len != LKPI_MHI_BHI_SIZE)
 +		return (-EOPNOTSUPP);
++	/* Without a raw consumer the IPCR channels carry QRTR for QMI. */
++	if (runtime->receive == NULL) {
++		error = lkpi_qrtr_mhi_attach(ctrl);
++		if (error != 0)
++			return (error);
++		qrtr = true;
++	}
 +	error = linuxkpi_mhi_alloc_context(ctrl, runtime->config);
-+	if (error != 0)
++	if (error != 0) {
++		if (qrtr)
++			(void)lkpi_qrtr_mhi_detach(ctrl);
 +		return (error);
++	}
 +	ctrl->lkpi_context->receive = runtime->receive;
 +	ctrl->lkpi_context->receive_arg = runtime->receive_arg;
 +	error = linuxkpi_mhi_alloc_transfer(ctrl, 20);
@@ -1817,6 +1856,8 @@ index 5d3c391f91a..5a75c83457b 100644
 +fail:
 +	mhi_controller_free_irqs(ctrl);
 +	linuxkpi_mhi_free_context(ctrl);
++	if (qrtr)
++		(void)lkpi_qrtr_mhi_detach(ctrl);
 +	return (error);
 +}
 +
@@ -1876,6 +1917,8 @@ index 5d3c391f91a..5a75c83457b 100644
 +	if (error == 0) {
 +		runtime->powered = true;
 +		error = linuxkpi_mhi_start_transport(ctrl);
++		if (error == 0)
++			error = lkpi_qrtr_mhi_up(ctrl);
 +	}
 +out:
 +	if (firmware != NULL)
@@ -1966,6 +2009,8 @@ index 5d3c391f91a..5a75c83457b 100644
 +	(void)linuxkpi_mhi_boot_free(&runtime->boot);
 +	linuxkpi_mhi_free_context(ctrl);
 +	runtime->prepared = false;
++	if (lkpi_qrtr_mhi_detach(ctrl) != 0)
++		pr_err("%s: retaining QRTR endpoint\n", __func__);
 +}
 +
 +int
@@ -2040,10 +2085,10 @@ index 5d3c391f91a..5a75c83457b 100644
  }
 diff --git a/sys/compat/linuxkpi/common/src/linux_mhi.h b/sys/compat/linuxkpi/common/src/linux_mhi.h
 new file mode 100644
-index 00000000000..e0fb67e637c
+index 00000000000..16771f11a7e
 --- /dev/null
 +++ b/sys/compat/linuxkpi/common/src/linux_mhi.h
-@@ -0,0 +1,179 @@
+@@ -0,0 +1,180 @@
 +/*-
 + * SPDX-License-Identifier: BSD-2-Clause
 + *
@@ -2187,6 +2232,7 @@ index 00000000000..e0fb67e637c
 +	struct lkpi_mhi_boot boot;
 +	int (*receive)(void *, const void *, size_t);
 +	void *receive_arg;
++	void *qrtr;		/* linux_qmi.c endpoint, if no raw consumer. */
 +	unsigned int irqs;
 +	bool prepared, powered, transport_started;
 +};
@@ -2223,6 +2269,1463 @@ index 00000000000..e0fb67e637c
 +int linuxkpi_mhi_free_memory(struct mhi_controller *, struct lkpi_mhi_dma *);
 +
 +#endif
+diff --git a/sys/compat/linuxkpi/common/src/linux_qmi.c b/sys/compat/linuxkpi/common/src/linux_qmi.c
+new file mode 100644
+index 00000000000..2ea3abd274c
+--- /dev/null
++++ b/sys/compat/linuxkpi/common/src/linux_qmi.c
+@@ -0,0 +1,906 @@
++/*-
++ * SPDX-License-Identifier: BSD-2-Clause
++ *
++ * Copyright (c) 2026 Diego Casati <diego.casati@gmail.com>
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++/*
++ * QMI client handles (linux/soc/qcom/qmi.h) on top of a minimal QRTR
++ * endpoint bound to the MHI IPCR channels.  There is no AF_QIPCRTR socket
++ * layer or name service: each MHI controller without a raw receive consumer
++ * gets one QRTR endpoint at prepare time, and QMI handles bind to the first
++ * matching NEW_SERVER (service, instance) announced on any endpoint.  As
++ * with the Linux name service, the lookup is global, so drivers driving
++ * several identical devices must use distinct instance ids.
++ */
++
++#include <sys/param.h>
++#include <sys/endian.h>
++#include <sys/kernel.h>
++#include <sys/lock.h>
++#include <sys/malloc.h>
++#include <sys/mutex.h>
++#include <sys/queue.h>
++#include <sys/sx.h>
++#include <sys/systm.h>
++#include <sys/taskqueue.h>
++#include <sys/time.h>
++
++#include <linux/kernel.h>
++#include <linux/mhi.h>
++#include <linux/socket.h>
++#include <linux/soc/qcom/qmi.h>
++
++#include "linux_mhi.h"
++#include "linux_qmi.h"
++
++#define	QRTR_PACKET_MAX		8192
++#define	QRTR_QUEUE_LEN		32
++#define	QRTR_SERVERS_MAX	8
++#define	QRTR_HDR_LEN		32
++#define	QRTR_CTRL_LEN		20
++#define	QRTR_IPCR_TX		20
++/* Remote node addressed by the initial HELLO (WCN7850 firmware). */
++#define	QRTR_REMOTE_NODE	7
++#define	QMI_HDR_LEN		7
++#define	QMI_DECODED_MAX		65536
++#define	QMI_HANDLERS_MAX	64
++
++static MALLOC_DEFINE(M_LKPIQMI, "lkpiqmi", "LinuxKPI QMI/QRTR");
++
++struct lkpi_qrtr_packet {
++	size_t		length;
++	uint8_t		data[QRTR_PACKET_MAX];
++};
++
++struct lkpi_qrtr_server {
++	uint32_t	service, instance, node, port;
++};
++
++struct lkpi_qrtr_ep {
++	TAILQ_ENTRY(lkpi_qrtr_ep) link;
++	struct mhi_controller	*ctrl;
++	struct task		task;
++	struct mtx		rx_lock;	/* Receive queue and rx_error. */
++	struct lkpi_qrtr_packet	queue[QRTR_QUEUE_LEN];
++	unsigned int		read, write, queued;
++	int			rx_error;
++	struct sx		tx_lock;	/* transmit[] and MHI submit. */
++	uint8_t			transmit[QRTR_PACKET_MAX];
++	/* Owned by the endpoint task. */
++	struct lkpi_qrtr_packet	incoming;
++	uint8_t			decoded[QMI_DECODED_MAX];
++	/* Protected by lkpi_qrtr_mtx. */
++	struct lkpi_qrtr_server	servers[QRTR_SERVERS_MAX];
++	unsigned int		nservers, refs;
++	uint64_t		gen;
++	int			error;
++	bool			hello_sent, dead, rescan;
++};
++
++/* Protected by lkpi_qrtr_mtx unless noted. */
++struct lkpi_qmi {
++	TAILQ_ENTRY(lkpi_qmi)	link;
++	struct qmi_handle	*handle;	/* Immutable. */
++	struct lkpi_qrtr_ep	*ep;		/* Bound endpoint. */
++	struct qmi_txn		*txn;
++	uint64_t		min_gen;
++	uint32_t		service, instance, node, port;
++	unsigned int		users;
++	uint16_t		next_id;
++	bool			lookup, stopping, quiescing;
++};
++
++static struct mtx lkpi_qrtr_mtx;
++MTX_SYSINIT(lkpi_qrtr, &lkpi_qrtr_mtx, "LinuxKPI QRTR", MTX_DEF);
++static TAILQ_HEAD(, lkpi_qrtr_ep) lkpi_qrtr_eps =
++    TAILQ_HEAD_INITIALIZER(lkpi_qrtr_eps);
++static TAILQ_HEAD(, lkpi_qmi) lkpi_qmi_clients =
++    TAILQ_HEAD_INITIALIZER(lkpi_qmi_clients);
++static uint64_t lkpi_qrtr_gen;
++
++static void
++lkpi_qmi_cancel_locked(struct lkpi_qmi *lq, int error)
++{
++	struct qmi_txn *txn = lq->txn;
++
++	mtx_assert(&lkpi_qrtr_mtx, MA_OWNED);
++	if (txn != NULL) {
++		txn->result = -error;
++		txn->done = true;
++		lq->txn = NULL;
++		wakeup(txn);
++	}
++}
++
++static void
++lkpi_qmi_txn_put_locked(struct lkpi_qmi *lq, struct qmi_txn *txn)
++{
++
++	mtx_assert(&lkpi_qrtr_mtx, MA_OWNED);
++	if (txn->active) {
++		txn->active = false;
++		txn->handle = NULL;
++		KASSERT(lq->users != 0, ("QMI transaction reference underflow"));
++		lq->users--;
++		wakeup(&lq->users);
++	}
++}
++
++static void
++lkpi_qmi_unbind_locked(struct lkpi_qmi *lq, int error)
++{
++
++	mtx_assert(&lkpi_qrtr_mtx, MA_OWNED);
++	lkpi_qmi_cancel_locked(lq, error);
++	lq->ep = NULL;
++}
++
++static void
++lkpi_qmi_unuse(struct lkpi_qmi *lq)
++{
++
++	mtx_lock(&lkpi_qrtr_mtx);
++	KASSERT(lq->users != 0, ("QMI user reference underflow"));
++	lq->users--;
++	wakeup(&lq->users);
++	mtx_unlock(&lkpi_qrtr_mtx);
++}
++
++static void
++lkpi_qrtr_header(uint8_t *packet, uint32_t type, uint32_t node,
++    uint32_t port, uint32_t length)
++{
++
++	memset(packet, 0, QRTR_HDR_LEN);
++	le32enc(packet, 1);
++	le32enc(packet + 4, type);
++	le32enc(packet + 8, LKPI_QRTR_LOCAL_NODE);
++	le32enc(packet + 12, type == LKPI_QRTR_TYPE_HELLO ?
++	    LKPI_QRTR_PORT_CTRL : LKPI_QRTR_LOCAL_PORT);
++	le32enc(packet + 20, length);
++	le32enc(packet + 24, node);
++	le32enc(packet + 28, port);
++}
++
++static int
++lkpi_qrtr_submit(struct lkpi_qrtr_ep *ep, struct lkpi_qmi *lq, size_t length)
++{
++	sbintime_t deadline = sbinuptime() + 5 * SBT_1S;
++	bool stopping;
++	int error;
++
++	sx_assert(&ep->tx_lock, SA_XLOCKED);
++	do {
++		mtx_lock(&lkpi_qrtr_mtx);
++		stopping = ep->dead || ep->error != 0 ||
++		    (lq != NULL && lq->stopping);
++		mtx_unlock(&lkpi_qrtr_mtx);
++		if (stopping)
++			return (-ESHUTDOWN);
++		error = linuxkpi_mhi_submit(ep->ctrl, QRTR_IPCR_TX,
++		    ep->transmit, length);
++		if (error != -EBUSY)
++			return (error);
++		pause_sbt("qrtrtx", SBT_1MS, 0, C_HARDCLOCK);
++	} while (sbinuptime() < deadline);
++	return (-ETIMEDOUT);
++}
++
++static int
++lkpi_qrtr_control(struct lkpi_qrtr_ep *ep, uint32_t type, uint32_t node,
++    uint32_t port)
++{
++	int error;
++
++	sx_xlock(&ep->tx_lock);
++	memset(ep->transmit, 0, QRTR_HDR_LEN + QRTR_CTRL_LEN);
++	lkpi_qrtr_header(ep->transmit, type, node, port, QRTR_CTRL_LEN);
++	le32enc(ep->transmit + QRTR_HDR_LEN, type);
++	if (type == LKPI_QRTR_TYPE_RESUME_TX) {
++		le32enc(ep->transmit + QRTR_HDR_LEN + 4, LKPI_QRTR_LOCAL_NODE);
++		le32enc(ep->transmit + QRTR_HDR_LEN + 8, LKPI_QRTR_LOCAL_PORT);
++	}
++	error = lkpi_qrtr_submit(ep, NULL, QRTR_HDR_LEN + QRTR_CTRL_LEN);
++	sx_xunlock(&ep->tx_lock);
++	return (error);
++}
++
++/* MHI receive hook: runs under the MHI event mutex, so only copy and defer. */
++static int
++lkpi_qrtr_receive(void *arg, const void *data, size_t length)
++{
++	struct lkpi_qrtr_ep *ep = arg;
++	struct lkpi_qrtr_packet *packet;
++	int error = 0;
++
++	mtx_lock(&ep->rx_lock);
++	if (ep->rx_error != 0)
++		goto out;
++	if (length > QRTR_PACKET_MAX || length < 16 ||
++	    ep->queued == QRTR_QUEUE_LEN) {
++		error = ep->queued == QRTR_QUEUE_LEN ? ENOBUFS : EMSGSIZE;
++		ep->rx_error = error;
++		taskqueue_enqueue(taskqueue_thread, &ep->task);
++		goto out;
++	}
++	packet = &ep->queue[ep->write];
++	memcpy(packet->data, data, length);
++	packet->length = length;
++	ep->write = (ep->write + 1) % QRTR_QUEUE_LEN;
++	ep->queued++;
++	taskqueue_enqueue(taskqueue_thread, &ep->task);
++out:
++	mtx_unlock(&ep->rx_lock);
++	return (error);
++}
++
++static void
++lkpi_qrtr_fail(struct lkpi_qrtr_ep *ep, int error)
++{
++	struct lkpi_qmi *lq;
++
++	mtx_lock(&lkpi_qrtr_mtx);
++	if (ep->error == 0) {
++		ep->error = error;
++		printf("LinuxKPI QRTR: endpoint failed: %d\n", error);
++	}
++	TAILQ_FOREACH(lq, &lkpi_qmi_clients, link)
++		if (lq->ep == ep)
++			lkpi_qmi_cancel_locked(lq, error);
++	mtx_unlock(&lkpi_qrtr_mtx);
++}
++
++static struct lkpi_qmi *
++lkpi_qmi_match_locked(struct lkpi_qrtr_ep *ep,
++    const struct lkpi_qrtr_server *srv)
++{
++	struct lkpi_qmi *lq;
++
++	mtx_assert(&lkpi_qrtr_mtx, MA_OWNED);
++	TAILQ_FOREACH(lq, &lkpi_qmi_clients, link)
++		if (lq->ep == NULL && lq->lookup && !lq->quiescing &&
++		    lq->service == srv->service &&
++		    lq->instance == srv->instance && ep->gen >= lq->min_gen)
++			return (lq);
++	return (NULL);
++}
++
++static struct lkpi_qmi *
++lkpi_qmi_bound_locked(struct lkpi_qrtr_ep *ep,
++    const struct lkpi_qrtr_server *srv)
++{
++	struct lkpi_qmi *lq;
++
++	mtx_assert(&lkpi_qrtr_mtx, MA_OWNED);
++	TAILQ_FOREACH(lq, &lkpi_qmi_clients, link)
++		if (lq->ep == ep && lq->service == srv->service &&
++		    lq->instance == srv->instance)
++			return (lq);
++	return (NULL);
++}
++
++/*
++ * Bind with the lock held and return with a user reference; the new_server
++ * callback runs unlocked.  As on Linux, a failing callback does not bind.
++ */
++static void
++lkpi_qmi_bind(struct lkpi_qmi *lq, struct lkpi_qrtr_ep *ep,
++    const struct lkpi_qrtr_server *srv)
++{
++	struct qmi_service service = { .node = srv->node, .port = srv->port };
++	struct qmi_handle *handle = lq->handle;
++	int error = 0;
++
++	mtx_assert(&lkpi_qrtr_mtx, MA_OWNED);
++	lq->ep = ep;
++	lq->node = srv->node;
++	lq->port = srv->port;
++	lq->stopping = false;
++	lq->users++;
++	mtx_unlock(&lkpi_qrtr_mtx);
++	if (handle->ops.new_server != NULL)
++		error = handle->ops.new_server(handle, &service);
++	mtx_lock(&lkpi_qrtr_mtx);
++	if (error != 0 && lq->ep == ep)
++		lkpi_qmi_unbind_locked(lq, ENXIO);
++	lq->users--;
++	wakeup(&lq->users);
++}
++
++static void
++lkpi_qrtr_rescan(struct lkpi_qrtr_ep *ep)
++{
++	struct lkpi_qmi *lq;
++	unsigned int i;
++
++	mtx_lock(&lkpi_qrtr_mtx);
++	if (!ep->rescan)
++		goto out;
++	ep->rescan = false;
++	for (i = 0; i < ep->nservers && !ep->dead; i++) {
++		if (lkpi_qmi_bound_locked(ep, &ep->servers[i]) != NULL)
++			continue;
++		lq = lkpi_qmi_match_locked(ep, &ep->servers[i]);
++		if (lq != NULL)
++			lkpi_qmi_bind(lq, ep, &ep->servers[i]);
++	}
++out:
++	mtx_unlock(&lkpi_qrtr_mtx);
++}
++
++static void
++lkpi_qrtr_forget_locked(struct lkpi_qrtr_ep *ep,
++    const struct lkpi_qrtr_server *srv)
++{
++	unsigned int i;
++
++	for (i = 0; i < ep->nservers; i++)
++		if (ep->servers[i].service == srv->service &&
++		    ep->servers[i].instance == srv->instance) {
++			ep->servers[i] = ep->servers[--ep->nservers];
++			return;
++		}
++}
++
++static void
++lkpi_qrtr_remember_locked(struct lkpi_qrtr_ep *ep,
++    const struct lkpi_qrtr_server *srv)
++{
++
++	lkpi_qrtr_forget_locked(ep, srv);
++	if (ep->nservers < QRTR_SERVERS_MAX)
++		ep->servers[ep->nservers++] = *srv;
++}
++
++static int
++lkpi_qrtr_server(struct lkpi_qrtr_ep *ep, const struct lkpi_qrtr_frame *frame)
++{
++	struct lkpi_qrtr_server srv;
++	struct qmi_service service;
++	struct qmi_handle *handle;
++	struct lkpi_qmi *lq;
++	int error = 0;
++
++	if (frame->length < QRTR_CTRL_LEN)
++		return (EPROTO);
++	srv.service = le32dec(frame->body + 4);
++	srv.instance = le32dec(frame->body + 8);
++	srv.node = le32dec(frame->body + 12);
++	srv.port = le32dec(frame->body + 16);
++	mtx_lock(&lkpi_qrtr_mtx);
++	if (ep->dead)
++		goto out;
++	lq = lkpi_qmi_bound_locked(ep, &srv);
++	/* Malformed announcements are fatal only for services we look up. */
++	if (srv.node != frame->node || srv.port == 0 ||
++	    srv.port >= LKPI_QRTR_PORT_CTRL ||
++	    (lq != NULL && (lq->node != srv.node || lq->port != srv.port))) {
++		if (lq != NULL || lkpi_qmi_match_locked(ep, &srv) != NULL)
++			error = EPROTO;
++		goto out;
++	}
++	if (frame->type == LKPI_QRTR_TYPE_DEL_SERVER) {
++		lkpi_qrtr_forget_locked(ep, &srv);
++		if (lq == NULL)
++			goto out;
++		lkpi_qmi_unbind_locked(lq, ENXIO);
++		handle = lq->handle;
++		lq->users++;
++		mtx_unlock(&lkpi_qrtr_mtx);
++		service.node = srv.node;
++		service.port = srv.port;
++		if (handle->ops.del_server != NULL)
++			handle->ops.del_server(handle, &service);
++		lkpi_qmi_unuse(lq);
++		return (0);
++	}
++	if (lq != NULL)
++		goto out;
++	lkpi_qrtr_remember_locked(ep, &srv);
++	lq = lkpi_qmi_match_locked(ep, &srv);
++	if (lq != NULL)
++		lkpi_qmi_bind(lq, ep, &srv);
++out:
++	mtx_unlock(&lkpi_qrtr_mtx);
++	return (error);
++}
++
++static int
++lkpi_qrtr_data(struct lkpi_qrtr_ep *ep, const struct lkpi_qrtr_frame *frame)
++{
++	const uint8_t *body = frame->body;
++	struct sockaddr_qrtr source = {
++		.sq_family = AF_QIPCRTR,
++		.sq_node = frame->node,
++		.sq_port = frame->port,
++	};
++	const struct qmi_msg_handler *handler;
++	struct qmi_handle *handle;
++	struct lkpi_qmi *lq;
++	struct qmi_txn *txn;
++	uint16_t id, message;
++	unsigned int i;
++	int error = 0;
++
++	if (frame->length < QMI_HDR_LEN ||
++	    le16dec(body + 5) != frame->length - QMI_HDR_LEN)
++		return (EPROTO);
++	id = le16dec(body + 1);
++	message = le16dec(body + 3);
++	mtx_lock(&lkpi_qrtr_mtx);
++	TAILQ_FOREACH(lq, &lkpi_qmi_clients, link)
++		if (lq->ep == ep && lq->node == frame->node &&
++		    lq->port == frame->port)
++			break;
++	/* No bound client, e.g. after stop or DEL_SERVER: drop. */
++	if (lq == NULL)
++		goto out;
++	if (body[0] == QMI_RESPONSE) {
++		txn = lq->txn;
++		/* A cancelled or late response never touches a retired txn. */
++		if (txn == NULL)
++			goto out;
++		error = -lkpi_qmi_reply(frame, lq->node, lq->port, txn,
++		    ep->decoded, txn->dest_size);
++		if (error == ENOENT) {
++			error = 0;
++			goto out;
++		}
++		if (error == 0)
++			memcpy(txn->dest, ep->decoded, txn->dest_size);
++		txn->result = -error;
++		txn->done = true;
++		lq->txn = NULL;
++		wakeup(txn);
++		goto out;
++	}
++	handle = lq->handle;
++	handler = handle->handler;
++	for (i = 0; i < QMI_HANDLERS_MAX && handler[i].fn != NULL; i++)
++		if (handler[i].type == QMI_INDICATION &&
++		    handler[i].msg_id == message)
++			break;
++	if (i == QMI_HANDLERS_MAX) {
++		error = E2BIG;
++		goto out;
++	}
++	if (handler[i].fn == NULL)
++		goto out;
++	if (handler[i].decoded_size > sizeof(ep->decoded))
++		error = E2BIG;
++	else
++		error = -lkpi_qmi_decode(handler[i].ei, body + QMI_HDR_LEN,
++		    frame->length - QMI_HDR_LEN, ep->decoded,
++		    handler[i].decoded_size);
++	if (error != 0)
++		goto out;
++	lq->users++;
++	mtx_unlock(&lkpi_qrtr_mtx);
++	/* ep->decoded is owned by this serialized endpoint task. */
++	handler[i].fn(handle, &source, NULL, ep->decoded);
++	lkpi_qmi_unuse(lq);
++	return (0);
++out:
++	mtx_unlock(&lkpi_qrtr_mtx);
++	if (error != 0)
++		printf("LinuxKPI QMI: rejected message %#x flags %#x txn %u "
++		    "from %u:%u: %d\n", message, body[0], id, frame->node,
++		    frame->port, error);
++	return (error);
++}
++
++static int
++lkpi_qrtr_packet(struct lkpi_qrtr_ep *ep, const uint8_t *data, size_t length)
++{
++	struct lkpi_qrtr_frame frame;
++	bool reply;
++	int error;
++
++	error = -lkpi_qrtr_frame_decode(data, length, &frame);
++	if (error != 0) {
++		hexdump(data, min_t(size_t, length, QRTR_HDR_LEN),
++		    "LinuxKPI QRTR: rejected header", HD_OMIT_CHARS);
++		return (error);
++	}
++	switch (frame.type) {
++	case LKPI_QRTR_TYPE_DATA:
++		error = lkpi_qrtr_data(ep, &frame);
++		if (error == 0 && frame.confirm != 0)
++			error = -lkpi_qrtr_control(ep, LKPI_QRTR_TYPE_RESUME_TX,
++			    frame.node, frame.port);
++		return (error);
++	case LKPI_QRTR_TYPE_RESUME_TX:
++		return (0);
++	case LKPI_QRTR_TYPE_HELLO:
++		mtx_lock(&lkpi_qrtr_mtx);
++		reply = !ep->hello_sent;
++		ep->hello_sent = true;
++		mtx_unlock(&lkpi_qrtr_mtx);
++		if (!reply)
++			return (0);
++		return (-lkpi_qrtr_control(ep, LKPI_QRTR_TYPE_HELLO,
++		    frame.node, LKPI_QRTR_PORT_CTRL));
++	case LKPI_QRTR_TYPE_NEW_SERVER:
++	case LKPI_QRTR_TYPE_DEL_SERVER:
++		return (lkpi_qrtr_server(ep, &frame));
++	default:
++		return (0);
++	}
++}
++
++static void
++lkpi_qrtr_task(void *arg, int pending __unused)
++{
++	struct lkpi_qrtr_ep *ep = arg;
++	int error;
++
++	lkpi_qrtr_rescan(ep);
++	for (;;) {
++		mtx_lock(&ep->rx_lock);
++		error = ep->rx_error;
++		if (error != 0 || ep->queued == 0) {
++			mtx_unlock(&ep->rx_lock);
++			break;
++		}
++		memcpy(&ep->incoming, &ep->queue[ep->read],
++		    sizeof(ep->incoming));
++		ep->read = (ep->read + 1) % QRTR_QUEUE_LEN;
++		ep->queued--;
++		mtx_unlock(&ep->rx_lock);
++		error = lkpi_qrtr_packet(ep, ep->incoming.data,
++		    ep->incoming.length);
++		if (error != 0) {
++			mtx_lock(&ep->rx_lock);
++			if (ep->rx_error == 0)
++				ep->rx_error = error;
++			mtx_unlock(&ep->rx_lock);
++			break;
++		}
++	}
++	if (error != 0)
++		lkpi_qrtr_fail(ep, error);
++}
++
++int
++lkpi_qrtr_mhi_attach(struct mhi_controller *ctrl)
++{
++	struct lkpi_mhi_runtime *runtime = ctrl->lkpi_runtime;
++	struct lkpi_qrtr_ep *ep;
++	int error;
++
++	if (runtime == NULL || runtime->qrtr != NULL)
++		return (-EINVAL);
++	ep = malloc(sizeof(*ep), M_LKPIQMI, M_WAITOK | M_ZERO);
++	ep->ctrl = ctrl;
++	mtx_init(&ep->rx_lock, "LinuxKPI QRTR rx", NULL, MTX_DEF);
++	sx_init(&ep->tx_lock, "LinuxKPI QRTR tx");
++	TASK_INIT(&ep->task, 0, lkpi_qrtr_task, ep);
++	error = linuxkpi_mhi_set_receive(ctrl, lkpi_qrtr_receive, ep);
++	if (error != 0) {
++		sx_destroy(&ep->tx_lock);
++		mtx_destroy(&ep->rx_lock);
++		free(ep, M_LKPIQMI);
++		return (error);
++	}
++	mtx_lock(&lkpi_qrtr_mtx);
++	ep->gen = ++lkpi_qrtr_gen;
++	TAILQ_INSERT_TAIL(&lkpi_qrtr_eps, ep, link);
++	mtx_unlock(&lkpi_qrtr_mtx);
++	runtime->qrtr = ep;
++	return (0);
++}
++
++/* Announce ourselves once the IPCR channels run in mission mode. */
++int
++lkpi_qrtr_mhi_up(struct mhi_controller *ctrl)
++{
++	struct lkpi_qrtr_ep *ep = ctrl->lkpi_runtime->qrtr;
++	bool hello;
++
++	if (ep == NULL)
++		return (0);
++	mtx_lock(&lkpi_qrtr_mtx);
++	hello = !ep->hello_sent;
++	ep->hello_sent = true;
++	mtx_unlock(&lkpi_qrtr_mtx);
++	if (!hello)
++		return (0);
++	return (lkpi_qrtr_control(ep, LKPI_QRTR_TYPE_HELLO, QRTR_REMOTE_NODE,
++	    LKPI_QRTR_PORT_CTRL));
++}
++
++/*
++ * Only valid once MHI no longer owns DMA.  Bound clients are unbound without
++ * a del_server callback: the device is being torn down, not the service.
++ */
++int
++lkpi_qrtr_mhi_detach(struct mhi_controller *ctrl)
++{
++	struct lkpi_mhi_runtime *runtime = ctrl->lkpi_runtime;
++	struct lkpi_qrtr_ep *ep;
++	struct lkpi_qmi *lq;
++	int error;
++
++	if (runtime == NULL || (ep = runtime->qrtr) == NULL)
++		return (0);
++	error = linuxkpi_mhi_set_receive(ctrl, NULL, NULL);
++	if (error != 0)
++		return (error);
++	mtx_lock(&lkpi_qrtr_mtx);
++	ep->dead = true;
++	TAILQ_REMOVE(&lkpi_qrtr_eps, ep, link);
++	TAILQ_FOREACH(lq, &lkpi_qmi_clients, link)
++		if (lq->ep == ep)
++			lkpi_qmi_unbind_locked(lq, ENXIO);
++	mtx_unlock(&lkpi_qrtr_mtx);
++	taskqueue_drain(taskqueue_thread, &ep->task);
++	mtx_lock(&lkpi_qrtr_mtx);
++	while (ep->refs != 0)
++		msleep(&ep->refs, &lkpi_qrtr_mtx, 0, "qrtrdet", 0);
++	mtx_unlock(&lkpi_qrtr_mtx);
++	runtime->qrtr = NULL;
++	sx_destroy(&ep->tx_lock);
++	mtx_destroy(&ep->rx_lock);
++	free(ep, M_LKPIQMI);
++	return (0);
++}
++
++int
++linuxkpi_qmi_handle_init(struct qmi_handle *handle, size_t resp_len_max,
++    const struct qmi_ops *ops, const struct qmi_msg_handler *handlers)
++{
++	struct lkpi_qmi *lq;
++
++	if (handle == NULL || handle->lkpi != NULL || handlers == NULL ||
++	    resp_len_max > QRTR_PACKET_MAX)
++		return (-EINVAL);
++	lq = malloc(sizeof(*lq), M_LKPIQMI, M_WAITOK | M_ZERO);
++	lq->handle = handle;
++	memset(&handle->ops, 0, sizeof(handle->ops));
++	if (ops != NULL)
++		handle->ops = *ops;
++	handle->handler = handlers;
++	handle->lkpi = lq;
++	mtx_lock(&lkpi_qrtr_mtx);
++	TAILQ_INSERT_TAIL(&lkpi_qmi_clients, lq, link);
++	mtx_unlock(&lkpi_qrtr_mtx);
++	return (0);
++}
++
++int
++linuxkpi_qmi_add_lookup(struct qmi_handle *handle, uint32_t service,
++    uint32_t version, uint32_t instance)
++{
++	struct lkpi_qmi *lq = handle->lkpi;
++	struct lkpi_qrtr_ep *ep;
++	unsigned int i;
++
++	if (lq == NULL || version > 0xff || instance > 0xffffff)
++		return (-EINVAL);
++	mtx_lock(&lkpi_qrtr_mtx);
++	lq->service = service;
++	lq->instance = (instance << 8) | version;
++	lq->lookup = true;
++	/* Servers announced before the lookup bind from the endpoint task. */
++	TAILQ_FOREACH(ep, &lkpi_qrtr_eps, link)
++		for (i = 0; i < ep->nservers; i++)
++			if (ep->servers[i].service == lq->service &&
++			    ep->servers[i].instance == lq->instance) {
++				ep->rescan = true;
++				taskqueue_enqueue(taskqueue_thread, &ep->task);
++				break;
++			}
++	mtx_unlock(&lkpi_qrtr_mtx);
++	return (0);
++}
++
++static int
++lkpi_qmi_quiesce(struct lkpi_qmi *lq, bool unlink)
++{
++	sbintime_t deadline = sbinuptime() + 5 * SBT_1S;
++	int error;
++
++	mtx_lock(&lkpi_qrtr_mtx);
++	lq->stopping = lq->quiescing = true;
++	lkpi_qmi_unbind_locked(lq, ESHUTDOWN);
++	while (lq->users != 0) {
++		if (msleep_sbt(&lq->users, &lkpi_qrtr_mtx, 0, "qmistop",
++		    deadline, 0, C_ABSOLUTE) != 0)
++			break;
++	}
++	/* Only endpoints attached after the drain may bind again. */
++	lq->min_gen = lkpi_qrtr_gen + 1;
++	lq->quiescing = false;
++	error = lq->users != 0 ? -ETIMEDOUT : 0;
++	if (error == 0 && unlink)
++		TAILQ_REMOVE(&lkpi_qmi_clients, lq, link);
++	mtx_unlock(&lkpi_qrtr_mtx);
++	return (error);
++}
++
++int
++linuxkpi_qmi_handle_stop(struct qmi_handle *handle)
++{
++
++	if (handle->lkpi == NULL)
++		return (0);
++	return (lkpi_qmi_quiesce(handle->lkpi, false));
++}
++
++void
++linuxkpi_qmi_handle_release(struct qmi_handle *handle)
++{
++	struct lkpi_qmi *lq = handle->lkpi;
++
++	if (lq == NULL)
++		return;
++	if (lkpi_qmi_quiesce(lq, true) != 0) {
++		/* handle->lkpi stays set so the owner can see the retention. */
++		printf("LinuxKPI QMI: retaining handle with active users\n");
++		return;
++	}
++	free(lq, M_LKPIQMI);
++	handle->lkpi = NULL;
++}
++
++int
++linuxkpi_qmi_txn_init(struct qmi_handle *handle, struct qmi_txn *txn,
++    const struct qmi_elem_info *ei, void *dest)
++{
++	struct lkpi_qmi *lq = handle->lkpi;
++	size_t size = lkpi_qmi_size(ei);
++	int error = 0;
++
++	if (lq == NULL || ei == NULL || dest == NULL || size == 0 ||
++	    size > QMI_DECODED_MAX)
++		return (-EINVAL);
++	memset(txn, 0, sizeof(*txn));
++	mtx_lock(&lkpi_qrtr_mtx);
++	if (lq->stopping || lq->ep == NULL || lq->ep->dead ||
++	    lq->ep->error != 0)
++		error = -ENXIO;
++	else if (lq->txn != NULL)
++		error = -EBUSY;
++	else {
++		txn->handle = handle;
++		txn->ei = ei;
++		txn->dest = dest;
++		txn->dest_size = size;
++		lq->next_id = lq->next_id == UINT16_MAX ? 1 : lq->next_id + 1;
++		txn->id = lq->next_id;
++		txn->active = true;
++		lq->users++;
++		lq->txn = txn;
++	}
++	mtx_unlock(&lkpi_qrtr_mtx);
++	return (error);
++}
++
++void
++linuxkpi_qmi_txn_cancel(struct qmi_txn *txn)
++{
++	struct lkpi_qmi *lq;
++
++	if (txn->handle == NULL || (lq = txn->handle->lkpi) == NULL)
++		return;
++	mtx_lock(&lkpi_qrtr_mtx);
++	if (lq->txn == txn)
++		lkpi_qmi_cancel_locked(lq, ECANCELED);
++	lkpi_qmi_txn_put_locked(lq, txn);
++	mtx_unlock(&lkpi_qrtr_mtx);
++}
++
++int
++linuxkpi_qmi_txn_wait(struct qmi_txn *txn, unsigned long timeout)
++{
++	struct lkpi_qmi *lq;
++	sbintime_t deadline;
++	int error;
++
++	if (txn->handle == NULL || (lq = txn->handle->lkpi) == NULL)
++		return (-EINVAL);
++	if (timeout == 0 || timeout > 30UL * hz) {
++		linuxkpi_qmi_txn_cancel(txn);
++		return (-EINVAL);
++	}
++	deadline = sbinuptime() + timeout * SBT_1S / hz;
++	mtx_lock(&lkpi_qrtr_mtx);
++	while (!txn->done && lq->txn == txn) {
++		error = msleep_sbt(txn, &lkpi_qrtr_mtx, 0, "qmitxn", deadline,
++		    0, C_ABSOLUTE);
++		if (error != 0) {
++			lkpi_qmi_cancel_locked(lq, error == EWOULDBLOCK ?
++			    ETIMEDOUT : error);
++			break;
++		}
++	}
++	error = txn->done ? txn->result : -ECANCELED;
++	lkpi_qmi_txn_put_locked(lq, txn);
++	mtx_unlock(&lkpi_qrtr_mtx);
++	return (error);
++}
++
++int
++linuxkpi_qmi_send_request(struct qmi_handle *handle, struct sockaddr_qrtr *sq,
++    struct qmi_txn *txn, uint32_t message, size_t maximum,
++    const struct qmi_elem_info *ei, const void *request)
++{
++	struct lkpi_qmi *lq = handle->lkpi;
++	struct lkpi_qrtr_ep *ep;
++	size_t length, total;
++	uint32_t node, port;
++	int error;
++
++	if (lq == NULL)
++		return (-ENXIO);
++	if (message > UINT16_MAX ||
++	    maximum > QRTR_PACKET_MAX - QRTR_HDR_LEN - QMI_HDR_LEN)
++		return (-EMSGSIZE);
++	mtx_lock(&lkpi_qrtr_mtx);
++	ep = lq->ep;
++	if (lq->txn != txn || txn->sent || lq->stopping || ep == NULL ||
++	    ep->dead || ep->error != 0 || (sq != NULL &&
++	    (sq->sq_node != lq->node || sq->sq_port != lq->port))) {
++		mtx_unlock(&lkpi_qrtr_mtx);
++		return (-ENXIO);
++	}
++	node = lq->node;
++	port = lq->port;
++	ep->refs++;
++	lq->users++;
++	mtx_unlock(&lkpi_qrtr_mtx);
++
++	sx_xlock(&ep->tx_lock);
++	memset(ep->transmit, 0, sizeof(ep->transmit));
++	error = lkpi_qmi_encode(ei, request,
++	    ep->transmit + QRTR_HDR_LEN + QMI_HDR_LEN, maximum, &length);
++	if (error != 0)
++		goto out;
++	total = roundup2(QRTR_HDR_LEN + QMI_HDR_LEN + length, 4);
++	lkpi_qrtr_header(ep->transmit, LKPI_QRTR_TYPE_DATA, node, port,
++	    QMI_HDR_LEN + length);
++	ep->transmit[QRTR_HDR_LEN] = QMI_REQUEST;
++	le16enc(ep->transmit + QRTR_HDR_LEN + 1, txn->id);
++	le16enc(ep->transmit + QRTR_HDR_LEN + 3, message);
++	le16enc(ep->transmit + QRTR_HDR_LEN + 5, length);
++	mtx_lock(&lkpi_qrtr_mtx);
++	if (lq->txn != txn || txn->done) {
++		mtx_unlock(&lkpi_qrtr_mtx);
++		error = -ECANCELED;
++		goto out;
++	}
++	txn->message = message;
++	txn->sent = true;
++	mtx_unlock(&lkpi_qrtr_mtx);
++	error = lkpi_qrtr_submit(ep, lq, total);
++out:
++	sx_xunlock(&ep->tx_lock);
++	mtx_lock(&lkpi_qrtr_mtx);
++	if (--ep->refs == 0)
++		wakeup(&ep->refs);
++	mtx_unlock(&lkpi_qrtr_mtx);
++	lkpi_qmi_unuse(lq);
++	return (error);
++}
+diff --git a/sys/compat/linuxkpi/common/src/linux_qmi.h b/sys/compat/linuxkpi/common/src/linux_qmi.h
+new file mode 100644
+index 00000000000..df835577473
+--- /dev/null
++++ b/sys/compat/linuxkpi/common/src/linux_qmi.h
+@@ -0,0 +1,67 @@
++/*-
++ * SPDX-License-Identifier: BSD-2-Clause
++ *
++ * Copyright (c) 2026 Diego Casati <diego.casati@gmail.com>
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++#ifndef _LINUXKPI_QMI_INTERNAL_H_
++#define _LINUXKPI_QMI_INTERNAL_H_
++
++#include <linux/soc/qcom/qmi.h>
++
++struct mhi_controller;
++
++/* QRTR v1 (32-byte) header constants for the MHI IPCR link. */
++#define	LKPI_QRTR_TYPE_DATA		1
++#define	LKPI_QRTR_TYPE_HELLO		2
++#define	LKPI_QRTR_TYPE_NEW_SERVER	4
++#define	LKPI_QRTR_TYPE_DEL_SERVER	5
++#define	LKPI_QRTR_TYPE_RESUME_TX	7
++#define	LKPI_QRTR_PORT_CTRL		0xfffffffeU
++#define	LKPI_QRTR_LOCAL_NODE		1
++#define	LKPI_QRTR_LOCAL_PORT		0x4000
++
++/* QMI TLV codec (linux_qmi_codec.c); errors are negative errno values. */
++size_t lkpi_qmi_size(const struct qmi_elem_info *);
++int lkpi_qmi_encode(const struct qmi_elem_info *, const void *, void *,
++    size_t, size_t *);
++int lkpi_qmi_decode(const struct qmi_elem_info *, const void *, size_t,
++    void *, size_t);
++
++struct lkpi_qrtr_frame {
++	uint32_t type, node, port, destination_node, destination_port, confirm;
++	const uint8_t *body;
++	size_t length;
++};
++
++int lkpi_qrtr_frame_decode(const void *, size_t, struct lkpi_qrtr_frame *);
++int lkpi_qmi_reply(const struct lkpi_qrtr_frame *, uint32_t, uint32_t,
++    const struct qmi_txn *, void *, size_t);
++
++/* QRTR endpoint on the MHI IPCR channels (linux_qmi.c). */
++int lkpi_qrtr_mhi_attach(struct mhi_controller *);
++int lkpi_qrtr_mhi_up(struct mhi_controller *);
++int lkpi_qrtr_mhi_detach(struct mhi_controller *);
++
++#endif /* _LINUXKPI_QMI_INTERNAL_H_ */
+diff --git a/sys/compat/linuxkpi/common/src/linux_qmi_codec.c b/sys/compat/linuxkpi/common/src/linux_qmi_codec.c
+new file mode 100644
+index 00000000000..9acdd9ca3ed
+--- /dev/null
++++ b/sys/compat/linuxkpi/common/src/linux_qmi_codec.c
+@@ -0,0 +1,436 @@
++/*-
++ * SPDX-License-Identifier: BSD-2-Clause
++ *
++ * Copyright (c) 2026 Diego Casati <diego.casati@gmail.com>
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++#include <sys/param.h>
++#include <sys/endian.h>
++#include <sys/systm.h>
++
++#include "linux_qmi.h"
++
++#define QMI_SCHEMA_MAX 256
++#define QMI_HOST_MAX 65536
++#define QMI_DEPTH_MAX 8
++
++struct qmi_elem_info qmi_response_type_v01_ei[] = {
++	{ .data_type = QMI_UNSIGNED_2_BYTE, .elem_len = 1, .elem_size = 2,
++	  .offset = offsetof(struct qmi_response_type_v01, result) },
++	{ .data_type = QMI_UNSIGNED_2_BYTE, .elem_len = 1, .elem_size = 2,
++	  .offset = offsetof(struct qmi_response_type_v01, error) },
++	{ .data_type = QMI_EOTI },
++};
++
++size_t
++lkpi_qmi_size(const struct qmi_elem_info *ei)
++{
++	size_t end, size = 0, width;
++	unsigned int i;
++
++	if (ei == NULL)
++		return (0);
++	for (i = 0; i < QMI_SCHEMA_MAX && ei[i].data_type != QMI_EOTI; i++) {
++		width = ei[i].data_type == QMI_DATA_LEN ? sizeof(uint32_t) :
++		    (size_t)ei[i].elem_size * ei[i].elem_len;
++		if (width == 0 || width > QMI_HOST_MAX ||
++		    ei[i].offset > QMI_HOST_MAX - width)
++			return (0);
++		end = ei[i].offset + width;
++		size = MAX(size, end);
++	}
++	return (i == QMI_SCHEMA_MAX ? 0 : size);
++}
++
++static unsigned int
++qmi_width(enum soc_qcom_qmi_data_type type)
++{
++	switch (type) {
++	case QMI_UNSIGNED_1_BYTE: return (1);
++	case QMI_UNSIGNED_2_BYTE: return (2);
++	case QMI_UNSIGNED_4_BYTE:
++	case QMI_SIGNED_4_BYTE_ENUM: return (4);
++	case QMI_UNSIGNED_8_BYTE: return (8);
++	default: return (0);
++	}
++}
++
++static uint64_t
++qmi_get(const void *p, unsigned int width)
++{
++	switch (width) {
++	case 1: return (*(const uint8_t *)p);
++	case 2: return (le16dec(p));
++	case 4: return (le32dec(p));
++	default: return (le64dec(p));
++	}
++}
++
++static void
++qmi_put(void *p, uint64_t value, unsigned int width)
++{
++	switch (width) {
++	case 1: *(uint8_t *)p = value; break;
++	case 2: le16enc(p, value); break;
++	case 4: le32enc(p, value); break;
++	default: le64enc(p, value); break;
++	}
++}
++
++static uint64_t
++qmi_host_get(const void *p, unsigned int width)
++{
++	uint8_t a;
++	uint16_t b;
++	uint32_t c;
++	uint64_t d;
++
++	switch (width) {
++	case 1: memcpy(&a, p, 1); return (a);
++	case 2: memcpy(&b, p, 2); return (b);
++	case 4: memcpy(&c, p, 4); return (c);
++	default: memcpy(&d, p, 8); return (d);
++	}
++}
++
++static void
++qmi_host_put(void *p, uint64_t value, unsigned int width)
++{
++	uint8_t a = value;
++	uint16_t b = value;
++	uint32_t c = value;
++
++	switch (width) {
++	case 1: memcpy(p, &a, 1); break;
++	case 2: memcpy(p, &b, 2); break;
++	case 4: memcpy(p, &c, 4); break;
++	default: memcpy(p, &value, 8); break;
++	}
++}
++
++/*
++ * Top-level fields share a TLV header. Nested structs contain packed fields,
++ * not C padding or TLV headers; DATA_LEN occupies u32 in host structures.
++ */
++static int
++qmi_fields(const struct qmi_elem_info *ei, unsigned int count,
++    uint8_t *host, size_t host_size, uint8_t *wire, size_t capacity,
++    size_t *used, bool decode, bool validate, unsigned int depth, bool nested)
++{
++	size_t pos = 0, n, bytes, sub, host_width;
++	uint32_t variable = 0;
++	bool have_variable = false;
++	unsigned int i, j, width;
++	uint64_t value;
++	int error;
++
++	if (depth > QMI_DEPTH_MAX)
++		return (E2BIG);
++	for (i = 0; i < count && ei[i].data_type != QMI_EOTI; i++) {
++		const struct qmi_elem_info *e = &ei[i];
++
++		n = e->array_type == VAR_LEN_ARRAY ? variable : e->elem_len;
++		if (e->array_type == VAR_LEN_ARRAY &&
++		    (!have_variable || n > e->elem_len))
++			return (EINVAL);
++		host_width = e->data_type == QMI_DATA_LEN ? sizeof(uint32_t) :
++		    (size_t)e->elem_size * n;
++		if (e->offset > host_size || host_width > host_size - e->offset)
++			return (EMSGSIZE);
++		if (e->data_type == QMI_OPT_FLAG) {
++			if (!decode || e->elem_size != 1)
++				return (EINVAL);
++			if (!validate)
++				host[e->offset] = 1;
++			continue;
++		}
++		if (e->data_type == QMI_DATA_LEN) {
++			width = e->elem_size;
++			if ((width != 1 && width != 2) || capacity - pos < width)
++				return (EMSGSIZE);
++			if (decode)
++				variable = qmi_get(wire + pos, width);
++			else {
++				memcpy(&variable, host + e->offset, sizeof(variable));
++				if (variable > (width == 1 ? UINT8_MAX : UINT16_MAX))
++					return (ERANGE);
++				qmi_put(wire + pos, variable, width);
++			}
++			if (decode && !validate)
++				memcpy(host + e->offset, &variable, sizeof(variable));
++			have_variable = true;
++			pos += width;
++			continue;
++		}
++		if (e->data_type == QMI_STRING) {
++			if (e->elem_size != 1 || e->elem_len == 0)
++				return (EINVAL);
++			width = nested ? (e->elem_len <= UINT8_MAX ? 1 : 2) : 0;
++			if (capacity - pos < width)
++				return (EMSGSIZE);
++			if (decode)
++				n = nested ? qmi_get(wire + pos, width) : capacity - pos;
++			else {
++				n = strnlen((char *)host + e->offset, e->elem_len);
++				if (nested)
++					qmi_put(wire + pos, n, width);
++			}
++			pos += width;
++			if (n >= e->elem_len || n > capacity - pos)
++				return (EMSGSIZE);
++			if (!validate) {
++				if (decode) {
++					memcpy(host + e->offset, wire + pos, n);
++					host[e->offset + n] = 0;
++				} else
++					memcpy(wire + pos, host + e->offset, n);
++			}
++			pos += n;
++			continue;
++		}
++		if (e->data_type == QMI_STRUCT) {
++			if (e->ei_array == NULL ||
++			    lkpi_qmi_size(e->ei_array) > e->elem_size)
++				return (EINVAL);
++			for (j = 0; j < n; j++) {
++				error = qmi_fields(e->ei_array, QMI_SCHEMA_MAX,
++				    validate ? NULL : host + e->offset + j * e->elem_size,
++				    e->elem_size, wire + pos, capacity - pos, &sub,
++				    decode, validate, depth + 1, true);
++				if (error != 0)
++					return (error);
++				pos += sub;
++			}
++			continue;
++		}
++		width = qmi_width(e->data_type);
++		if (width == 0 || width != e->elem_size || n > SIZE_MAX / width)
++			return (EINVAL);
++		bytes = n * width;
++		if (bytes > capacity - pos)
++			return (EMSGSIZE);
++		if (!validate) {
++			for (j = 0; j < n; j++) {
++				if (decode) {
++					value = qmi_get(wire + pos + j * width, width);
++					qmi_host_put(host + e->offset + j * width,
++					    value, width);
++				} else {
++					value = qmi_host_get(host + e->offset + j * width,
++					    width);
++					qmi_put(wire + pos + j * width, value, width);
++				}
++			}
++		}
++		pos += bytes;
++	}
++	if (i == QMI_SCHEMA_MAX)
++		return (E2BIG);
++	*used = pos;
++	return (0);
++}
++
++int
++lkpi_qmi_encode(const struct qmi_elem_info *ei, const void *host,
++    void *output, size_t capacity, size_t *length)
++{
++	uint8_t *wire = output;
++	size_t size, pos = 0, used;
++	unsigned int i = 0, end, first;
++	int error;
++
++	if (ei == NULL || host == NULL || output == NULL || length == NULL)
++		return (-EINVAL);
++	size = lkpi_qmi_size(ei);
++	while (i < QMI_SCHEMA_MAX && ei[i].data_type != QMI_EOTI) {
++		first = i;
++		for (end = i + 1; end < QMI_SCHEMA_MAX &&
++		    ei[end].data_type != QMI_EOTI &&
++		    ei[end].tlv_type == ei[i].tlv_type; end++)
++			;
++		i = end;
++		if (ei[first].data_type == QMI_OPT_FLAG) {
++			if (!*((const uint8_t *)host + ei[first].offset))
++				continue;
++			first++;
++		}
++		if (first == end || pos > capacity || capacity - pos < 3)
++			return (-EMSGSIZE);
++		error = qmi_fields(ei + first, end - first, __DECONST(uint8_t *, host),
++		    size, wire + pos + 3, capacity - pos - 3, &used, false,
++		    false, 0, false);
++		if (error != 0)
++			return (-error);
++		if (used > UINT16_MAX)
++			return (-EMSGSIZE);
++		wire[pos] = ei[first].tlv_type;
++		le16enc(wire + pos + 1, used);
++		pos += 3 + used;
++	}
++	if (i == QMI_SCHEMA_MAX)
++		return (-E2BIG);
++	*length = pos;
++	return (0);
++}
++
++static int
++qmi_decode_pass(const struct qmi_elem_info *ei, const uint8_t *input,
++    size_t length, void *output, size_t size, bool validate)
++{
++	bool seen[256] = { false };
++	size_t pos = 0, bytes, used;
++	unsigned int i, end;
++	uint8_t type;
++	int error;
++
++	while (pos < length) {
++		if (length - pos < 3)
++			return (EMSGSIZE);
++		type = input[pos];
++		bytes = le16dec(input + pos + 1);
++		pos += 3;
++		if (bytes > length - pos || seen[type])
++			return (EBADMSG);
++		seen[type] = true;
++		for (i = 0; i < QMI_SCHEMA_MAX && ei[i].data_type != QMI_EOTI; i++)
++			if (ei[i].tlv_type == type)
++				break;
++		if (i == QMI_SCHEMA_MAX)
++			return (E2BIG);
++		if (ei[i].data_type != QMI_EOTI) {
++			for (end = i + 1; end < QMI_SCHEMA_MAX &&
++			    ei[end].data_type != QMI_EOTI &&
++			    ei[end].tlv_type == type; end++)
++				;
++			error = qmi_fields(ei + i, end - i, output, size,
++			    __DECONST(uint8_t *, input + pos), bytes, &used,
++			    true, validate, 0, false);
++			if (error != 0 || used != bytes)
++				return (error != 0 ? error : EBADMSG);
++		}
++		pos += bytes;
++	}
++	for (i = 0; i < QMI_SCHEMA_MAX && ei[i].data_type != QMI_EOTI;) {
++		if (ei[i].data_type != QMI_OPT_FLAG && !seen[ei[i].tlv_type])
++			return (ENOMSG);
++		for (end = i + 1; end < QMI_SCHEMA_MAX &&
++		    ei[end].data_type != QMI_EOTI &&
++		    ei[end].tlv_type == ei[i].tlv_type; end++)
++			;
++		i = end;
++	}
++	return (i == QMI_SCHEMA_MAX ? E2BIG : 0);
++}
++
++int
++lkpi_qmi_decode(const struct qmi_elem_info *ei, const void *input,
++    size_t length, void *output, size_t size)
++{
++	int error;
++
++	if (ei == NULL || input == NULL || output == NULL ||
++	    lkpi_qmi_size(ei) > size || size > QMI_HOST_MAX)
++		return (-EINVAL);
++	error = qmi_decode_pass(ei, input, length, NULL, size, true);
++	if (error != 0)
++		return (-error);
++	memset(output, 0, size);
++	return (-qmi_decode_pass(ei, input, length, output, size, false));
++}
++
++int
++lkpi_qrtr_frame_decode(const void *input, size_t length,
++    struct lkpi_qrtr_frame *output)
++{
++	const uint8_t *data = input;
++	struct lkpi_qrtr_frame frame;
++	size_t header;
++	uint32_t size;
++
++	if (data == NULL || output == NULL)
++		return (-EINVAL);
++	if (length >= 32 && le32dec(data) == 1) {
++		header = 32;
++		frame.type = le32dec(data + 4);
++		frame.node = le32dec(data + 8);
++		frame.port = le32dec(data + 12);
++		frame.confirm = le32dec(data + 16);
++		size = le32dec(data + 20);
++		frame.destination_node = le32dec(data + 24);
++		frame.destination_port = le32dec(data + 28);
++	} else if (length >= 16 && data[0] == 3 && data[3] == 0 &&
++	    (data[2] & ~1U) == 0) {
++		header = 16;
++		frame.type = data[1];
++		frame.confirm = data[2] & 1;
++		size = le32dec(data + 4);
++		frame.node = le16dec(data + 8);
++		frame.port = le16dec(data + 10);
++		frame.destination_node = le16dec(data + 12);
++		frame.destination_port = le16dec(data + 14);
++	} else
++		return (-EPROTONOSUPPORT);
++	if (size > length - header ||
++	    (length != header + size && length != roundup2(header + size, 4)) ||
++	    frame.confirm > 1 || frame.node == 0 || frame.node == UINT32_MAX)
++		return (-EPROTO);
++	frame.body = data + header;
++	frame.length = size;
++	if (frame.type == LKPI_QRTR_TYPE_DATA) {
++		if (frame.destination_node != LKPI_QRTR_LOCAL_NODE ||
++		    frame.destination_port != LKPI_QRTR_LOCAL_PORT ||
++		    size < 7 || le16dec(frame.body + 5) != size - 7 ||
++		    (frame.body[0] != QMI_RESPONSE &&
++		    frame.body[0] != QMI_INDICATION))
++			return (-EPROTO);
++	} else if ((frame.type != LKPI_QRTR_TYPE_HELLO &&
++	    frame.type != LKPI_QRTR_TYPE_NEW_SERVER &&
++	    frame.type != LKPI_QRTR_TYPE_DEL_SERVER &&
++	    frame.type != LKPI_QRTR_TYPE_RESUME_TX) || size != 20 ||
++	    le32dec(frame.body) != frame.type)
++		return (-EPROTO);
++	*output = frame;
++	return (0);
++}
++
++int
++lkpi_qmi_reply(const struct lkpi_qrtr_frame *frame,
++    uint32_t node, uint32_t port, const struct qmi_txn *txn,
++    void *output, size_t size)
++{
++	if (frame == NULL || txn == NULL || frame->body == NULL ||
++	    frame->type != LKPI_QRTR_TYPE_DATA ||
++	    frame->node != node || frame->port != port ||
++	    frame->destination_node != LKPI_QRTR_LOCAL_NODE ||
++	    frame->destination_port != LKPI_QRTR_LOCAL_PORT ||
++	    frame->length < 7 || frame->body[0] != QMI_RESPONSE ||
++	    le16dec(frame->body + 5) != frame->length - 7)
++		return (-EPROTO);
++	if (!txn->active || !txn->sent || txn->done ||
++	    le16dec(frame->body + 1) != txn->id ||
++	    le16dec(frame->body + 3) != txn->message)
++		return (-ENOENT);
++	return (lkpi_qmi_decode(txn->ei, frame->body + 7,
++	    frame->length - 7, output, size));
++}
+diff --git a/sys/conf/files b/sys/conf/files
+index c3b8e828874..01273b31fca 100644
+--- a/sys/conf/files
++++ b/sys/conf/files
+@@ -4753,6 +4753,10 @@ compat/linuxkpi/common/src/linux_math.c		optional compat_linuxkpi \
+ 	compile-with "${LINUXKPI_C}"
+ compat/linuxkpi/common/src/linux_mhi.c		optional compat_linuxkpi wlan \
+ 	compile-with "${LINUXKPI_C}"
++compat/linuxkpi/common/src/linux_qmi.c		optional compat_linuxkpi wlan \
++	compile-with "${LINUXKPI_C}"
++compat/linuxkpi/common/src/linux_qmi_codec.c	optional compat_linuxkpi wlan \
++	compile-with "${LINUXKPI_C}"
+ compat/linuxkpi/common/src/linux_netdev.c	optional compat_linuxkpi \
+ 	compile-with "${LINUXKPI_C}"
+ compat/linuxkpi/common/src/linux_page.c		optional compat_linuxkpi \
+diff --git a/sys/modules/linuxkpi_wlan/Makefile b/sys/modules/linuxkpi_wlan/Makefile
+index a8dd06f06bc..b9cd34458c3 100644
+--- a/sys/modules/linuxkpi_wlan/Makefile
++++ b/sys/modules/linuxkpi_wlan/Makefile
+@@ -5,8 +5,9 @@ SRCS=	linux_80211.c \
+ 	linux_80211_macops.c
+ SRCS+=	linuxkpi_80211_pm.c
+ 
+-# QCA ath11k support.
++# QCA ath1[012]k support.
+ SRCS+=	linux_mhi.c
++SRCS+=	linux_qmi.c linux_qmi_codec.c
+ 
+ SRCS+=	opt_wlan.h
+ SRCS+=	${LINUXKPI_GENSRCS}
 -- 
 2.56.0
 

@@ -1,4 +1,4 @@
-From 4f462fadbb9243eb08c121ba4372074335451942 Mon Sep 17 00:00:00 2001
+From af47bda5cc81ba4426c20f3d97d51d42cf296b77 Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 14:44:31 -0600
 Subject: [PATCH 6/7] ath12k: add WCN7850 support on FreeBSD
@@ -9,8 +9,8 @@ kept in the #else branch, so the vendor diff is additive and future
 imports stay mergeable.  New conditionals on CONFIG_OF and
 CONFIG_ATH12K_AHB apply only to FreeBSD.
 
-- qmi_native.c, qmi_native_codec.c: QRTR/QMI transport over MHI, used
-  through the LinuxKPI qmi.h ops.
+- qmi, mhi: use the stock qmi_handle_init() on the LinuxKPI QMI/QRTR
+  implementation; deinit keeps the handle if LinuxKPI retains it.
 - dp: track DMA ownership of the data path so that teardown after a
   failed or partial start never frees memory the device may still
   write.  Validate the CMEM page-table layout (dp_cc.h).
@@ -19,62 +19,55 @@ CONFIG_ATH12K_AHB apply only to FreeBSD.
   init, teardown and error-path state tracking.
 - reg: support strict self-managed regulatory.  Apply the
   hw.ath12k.country tunable before the boot regd is published.  Accept
-  NO_IR and radar channels in the strict channel list.  Skip the 6 GHz
-  regd rebuild on authorize.
+  NO_IR and radar channels in the strict channel list, and 5 GHz rules
+  up to 80 MHz.  Skip the 6 GHz regd rebuild on authorize.
 - The requested boot country is logged at ATH12K_DBG_REG instead of
   info.
 
-Tested on WCN7850 hw2.0 with WPA2-PSK on 2.4 GHz and 5 GHz.
+Tested on WCN7850 hw2.0 with WPA2-PSK on 2.4 GHz and 5 GHz (VHT80).
 
 Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
 ---
- sys/contrib/dev/athk/ath12k/ce.c              |  43 ++
- sys/contrib/dev/athk/ath12k/ce.h              |   8 +
- sys/contrib/dev/athk/ath12k/core.c            | 300 +++++++++
- sys/contrib/dev/athk/ath12k/core.h            |  25 +
- sys/contrib/dev/athk/ath12k/dp.c              | 623 ++++++++++++++++++
- sys/contrib/dev/athk/ath12k/dp.h              |  62 ++
- sys/contrib/dev/athk/ath12k/dp_cc.h           |  60 ++
- sys/contrib/dev/athk/ath12k/dp_cmn.h          |   4 +
- sys/contrib/dev/athk/ath12k/dp_htt.c          |  54 ++
- sys/contrib/dev/athk/ath12k/dp_mon.c          |   8 +
- sys/contrib/dev/athk/ath12k/dp_peer.c         |  12 +
- sys/contrib/dev/athk/ath12k/dp_peer.h         |   4 +
- sys/contrib/dev/athk/ath12k/dp_rx.c           |  75 +++
- sys/contrib/dev/athk/ath12k/dp_tx.c           |  15 +
- sys/contrib/dev/athk/ath12k/fw.c              |  16 +
- sys/contrib/dev/athk/ath12k/hal.c             |  18 +
- sys/contrib/dev/athk/ath12k/htc.c             | 118 ++++
- sys/contrib/dev/athk/ath12k/htc.h             |  67 ++
- sys/contrib/dev/athk/ath12k/mac.c             | 157 +++++
- sys/contrib/dev/athk/ath12k/mhi.c             |  33 +
- sys/contrib/dev/athk/ath12k/pci.c             | 297 +++++++++
- sys/contrib/dev/athk/ath12k/pci.h             |  13 +
- sys/contrib/dev/athk/ath12k/peer.c            |   4 +
- sys/contrib/dev/athk/ath12k/qmi.c             | 171 +++++
- sys/contrib/dev/athk/ath12k/qmi.h             |   6 +
- sys/contrib/dev/athk/ath12k/qmi_native.c      | 623 ++++++++++++++++++
- sys/contrib/dev/athk/ath12k/qmi_native.h      |  56 ++
- .../dev/athk/ath12k/qmi_native_codec.c        | 421 ++++++++++++
- sys/contrib/dev/athk/ath12k/reg.c             | 464 +++++++++++++
- sys/contrib/dev/athk/ath12k/reg.h             |   4 +
- sys/contrib/dev/athk/ath12k/wifi7/core.c      |  17 +
- sys/contrib/dev/athk/ath12k/wifi7/dp.c        |  17 +
- sys/contrib/dev/athk/ath12k/wifi7/dp_mon.c    |  26 +
- sys/contrib/dev/athk/ath12k/wifi7/dp_rx.c     |  10 +
- sys/contrib/dev/athk/ath12k/wifi7/dp_tx.c     |  77 +++
- sys/contrib/dev/athk/ath12k/wifi7/hal.c       |  57 ++
- sys/contrib/dev/athk/ath12k/wifi7/hal_rx.c    |  39 ++
- sys/contrib/dev/athk/ath12k/wifi7/hw.c        |   3 +
- sys/contrib/dev/athk/ath12k/wifi7/pci.c       |   4 +
- sys/contrib/dev/athk/ath12k/wmi.c             | 581 ++++++++++++++++
- sys/contrib/dev/athk/ath12k/wmi.h             | 158 +++++
- sys/modules/ath12k/Makefile                   |   1 +
- 42 files changed, 4751 insertions(+)
+ sys/contrib/dev/athk/ath12k/ce.c           |  43 ++
+ sys/contrib/dev/athk/ath12k/ce.h           |   8 +
+ sys/contrib/dev/athk/ath12k/core.c         | 300 ++++++++++
+ sys/contrib/dev/athk/ath12k/core.h         |  25 +
+ sys/contrib/dev/athk/ath12k/dp.c           | 623 +++++++++++++++++++++
+ sys/contrib/dev/athk/ath12k/dp.h           |  62 ++
+ sys/contrib/dev/athk/ath12k/dp_cc.h        |  60 ++
+ sys/contrib/dev/athk/ath12k/dp_cmn.h       |   4 +
+ sys/contrib/dev/athk/ath12k/dp_htt.c       |  54 ++
+ sys/contrib/dev/athk/ath12k/dp_mon.c       |   8 +
+ sys/contrib/dev/athk/ath12k/dp_peer.c      |  12 +
+ sys/contrib/dev/athk/ath12k/dp_peer.h      |   4 +
+ sys/contrib/dev/athk/ath12k/dp_rx.c        |  75 +++
+ sys/contrib/dev/athk/ath12k/dp_tx.c        |  15 +
+ sys/contrib/dev/athk/ath12k/fw.c           |  16 +
+ sys/contrib/dev/athk/ath12k/hal.c          |  18 +
+ sys/contrib/dev/athk/ath12k/htc.c          | 118 ++++
+ sys/contrib/dev/athk/ath12k/htc.h          |  67 +++
+ sys/contrib/dev/athk/ath12k/mac.c          | 157 ++++++
+ sys/contrib/dev/athk/ath12k/mhi.c          |  25 +
+ sys/contrib/dev/athk/ath12k/pci.c          | 297 ++++++++++
+ sys/contrib/dev/athk/ath12k/pci.h          |  13 +
+ sys/contrib/dev/athk/ath12k/peer.c         |   4 +
+ sys/contrib/dev/athk/ath12k/qmi.c          | 160 ++++++
+ sys/contrib/dev/athk/ath12k/qmi.h          |   6 +
+ sys/contrib/dev/athk/ath12k/reg.c          | 472 ++++++++++++++++
+ sys/contrib/dev/athk/ath12k/reg.h          |   4 +
+ sys/contrib/dev/athk/ath12k/wifi7/core.c   |  17 +
+ sys/contrib/dev/athk/ath12k/wifi7/dp.c     |  17 +
+ sys/contrib/dev/athk/ath12k/wifi7/dp_mon.c |  26 +
+ sys/contrib/dev/athk/ath12k/wifi7/dp_rx.c  |  10 +
+ sys/contrib/dev/athk/ath12k/wifi7/dp_tx.c  |  77 +++
+ sys/contrib/dev/athk/ath12k/wifi7/hal.c    |  57 ++
+ sys/contrib/dev/athk/ath12k/wifi7/hal_rx.c |  39 ++
+ sys/contrib/dev/athk/ath12k/wifi7/hw.c     |   3 +
+ sys/contrib/dev/athk/ath12k/wifi7/pci.c    |   4 +
+ sys/contrib/dev/athk/ath12k/wmi.c          | 581 +++++++++++++++++++
+ sys/contrib/dev/athk/ath12k/wmi.h          | 158 ++++++
+ 38 files changed, 3639 insertions(+)
  create mode 100644 sys/contrib/dev/athk/ath12k/dp_cc.h
- create mode 100644 sys/contrib/dev/athk/ath12k/qmi_native.c
- create mode 100644 sys/contrib/dev/athk/ath12k/qmi_native.h
- create mode 100644 sys/contrib/dev/athk/ath12k/qmi_native_codec.c
 
 diff --git a/sys/contrib/dev/athk/ath12k/ce.c b/sys/contrib/dev/athk/ath12k/ce.c
 index 67bbc6d8d0c..339fa90dce8 100644
@@ -3219,16 +3212,12 @@ index b253d1e3f40..b70f472e562 100644
  		ret = ath12k_regd_update(ar, true);
  		if (ret) {
 diff --git a/sys/contrib/dev/athk/ath12k/mhi.c b/sys/contrib/dev/athk/ath12k/mhi.c
-index 69a377c15bb..fce772bf6ec 100644
+index 69a377c15bb..c5b671c58d5 100644
 --- a/sys/contrib/dev/athk/ath12k/mhi.c
 +++ b/sys/contrib/dev/athk/ath12k/mhi.c
-@@ -15,8 +15,15 @@
- #include "debug.h"
+@@ -16,7 +16,11 @@
  #include "mhi.h"
  #include "pci.h"
-+#if defined(__FreeBSD__)
-+#include "qmi_native.h"
-+#endif
  
 +#if defined(__FreeBSD__)
 +#define MHI_TIMEOUT_DEFAULT_MS	5000
@@ -3238,7 +3227,7 @@ index 69a377c15bb..fce772bf6ec 100644
  #define OTP_INVALID_BOARD_ID	0xFFFF
  #define OTP_VALID_DUALMAC_BOARD_ID_MASK		0x1000
  #define MHI_CB_INVALID	0xff
-@@ -274,6 +281,9 @@ int ath12k_mhi_register(struct ath12k_pci *ab_pci)
+@@ -274,6 +278,9 @@ int ath12k_mhi_register(struct ath12k_pci *ab_pci)
  	return 0;
  
  free_controller:
@@ -3248,7 +3237,7 @@ index 69a377c15bb..fce772bf6ec 100644
  	mhi_free_controller(mhi_ctrl);
  	ab_pci->mhi_ctrl = NULL;
  	return ret;
-@@ -283,6 +293,13 @@ void ath12k_mhi_unregister(struct ath12k_pci *ab_pci)
+@@ -283,6 +290,13 @@ void ath12k_mhi_unregister(struct ath12k_pci *ab_pci)
  {
  	struct mhi_controller *mhi_ctrl = ab_pci->mhi_ctrl;
  
@@ -3262,7 +3251,7 @@ index 69a377c15bb..fce772bf6ec 100644
  	mhi_unregister_controller(mhi_ctrl);
  	kfree(mhi_ctrl->irq);
  	mhi_free_controller(mhi_ctrl);
-@@ -446,8 +463,12 @@ static int ath12k_mhi_set_state(struct ath12k_pci *ab_pci,
+@@ -446,8 +460,12 @@ static int ath12k_mhi_set_state(struct ath12k_pci *ab_pci,
  		ret = 0;
  		break;
  	case ATH12K_MHI_POWER_OFF_KEEP_DEV:
@@ -3275,7 +3264,7 @@ index 69a377c15bb..fce772bf6ec 100644
  		break;
  	case ATH12K_MHI_FORCE_POWER_OFF:
  		mhi_power_down(ab_pci->mhi_ctrl, false);
-@@ -492,10 +513,18 @@ int ath12k_mhi_start(struct ath12k_pci *ab_pci)
+@@ -492,6 +510,9 @@ int ath12k_mhi_start(struct ath12k_pci *ab_pci)
  	if (ret)
  		goto out;
  
@@ -3285,16 +3274,7 @@ index 69a377c15bb..fce772bf6ec 100644
  	ret = ath12k_mhi_set_state(ab_pci, ATH12K_MHI_POWER_ON);
  	if (ret)
  		goto out;
- 
-+#if defined(__FreeBSD__)
-+	ret = ath12k_qmi_native_hello(&ab_pci->ab->qmi.handle);
-+	if (ret)
-+		goto out;
-+#endif
- 	return 0;
- 
- out:
-@@ -528,5 +557,9 @@ void ath12k_mhi_resume(struct ath12k_pci *ab_pci)
+@@ -528,5 +549,9 @@ void ath12k_mhi_resume(struct ath12k_pci *ab_pci)
  
  void ath12k_mhi_coredump(struct mhi_controller *mhi_ctrl, bool in_panic)
  {
@@ -3949,21 +3929,20 @@ index 2e875176baa..c04a2082577 100644
  	}
  
 diff --git a/sys/contrib/dev/athk/ath12k/qmi.c b/sys/contrib/dev/athk/ath12k/qmi.c
-index 32049321917..054c3fb56a4 100644
+index 32049321917..a6a9f8e9182 100644
 --- a/sys/contrib/dev/athk/ath12k/qmi.c
 +++ b/sys/contrib/dev/athk/ath12k/qmi.c
-@@ -13,6 +13,10 @@
+@@ -13,6 +13,9 @@
  #include "qmi.h"
  #include "core.h"
  #include "debug.h"
 +#if defined(__FreeBSD__)
 +#include "pci.h"
-+#include "qmi_native.h"
 +#endif
  #include <linux/of.h>
  #include <linux/firmware.h>
  #include <linux/of_address.h>
-@@ -2454,6 +2458,9 @@ int ath12k_qmi_respond_fw_mem_request(struct ath12k_base *ab)
+@@ -2454,6 +2457,9 @@ int ath12k_qmi_respond_fw_mem_request(struct ath12k_base *ab)
  	if (ret < 0)
  		goto out;
  
@@ -3973,7 +3952,7 @@ index 32049321917..054c3fb56a4 100644
  	ret = qmi_send_request(&ab->qmi.handle, NULL, &txn,
  			       QMI_WLANFW_RESPOND_MEM_REQ_V01,
  			       QMI_WLANFW_RESPOND_MEM_REQ_MSG_V01_MAX_LEN,
-@@ -2557,6 +2564,12 @@ static void ath12k_qmi_free_target_mem_chunk(struct ath12k_base *ab)
+@@ -2557,6 +2563,12 @@ static void ath12k_qmi_free_target_mem_chunk(struct ath12k_base *ab)
  	struct ath12k_hw_group *ag = ab->ag;
  	int i, mlo_idx;
  
@@ -3986,7 +3965,7 @@ index 32049321917..054c3fb56a4 100644
  	for (i = 0, mlo_idx = 0; i < ab->qmi.mem_seg_count; i++) {
  		if (ab->qmi.target_mem[i].type == MLO_GLOBAL_MEM_REGION_TYPE) {
  			ath12k_qmi_free_mlo_mem_chunk(ab,
-@@ -2597,6 +2610,10 @@ static int ath12k_qmi_alloc_chunk(struct ath12k_base *ab,
+@@ -2597,6 +2609,10 @@ static int ath12k_qmi_alloc_chunk(struct ath12k_base *ab,
  			goto this_chunk_done;
  
  		/* cannot reuse the existing chunk */
@@ -3997,7 +3976,7 @@ index 32049321917..054c3fb56a4 100644
  		dma_free_coherent(ab->dev, chunk->prev_size,
  				  chunk->v.addr, chunk->paddr);
  		chunk->v.addr = NULL;
-@@ -2731,6 +2748,7 @@ static int ath12k_qmi_alloc_target_mem_chunk(struct ath12k_base *ab)
+@@ -2731,6 +2747,7 @@ static int ath12k_qmi_alloc_target_mem_chunk(struct ath12k_base *ab)
  
  static int ath12k_qmi_assign_target_mem_chunk(struct ath12k_base *ab)
  {
@@ -4005,7 +3984,7 @@ index 32049321917..054c3fb56a4 100644
  	struct reserved_mem *rmem;
  	size_t avail_rmem_size;
  	int i, idx, ret;
-@@ -2851,6 +2869,9 @@ static int ath12k_qmi_assign_target_mem_chunk(struct ath12k_base *ab)
+@@ -2851,6 +2868,9 @@ static int ath12k_qmi_assign_target_mem_chunk(struct ath12k_base *ab)
  out:
  	ath12k_qmi_free_target_mem_chunk(ab);
  	return ret;
@@ -4015,7 +3994,7 @@ index 32049321917..054c3fb56a4 100644
  }
  
  /* clang stack usage explodes if this is inlined */
-@@ -3160,6 +3181,10 @@ static void ath12k_qmi_m3_free(struct ath12k_base *ab)
+@@ -3160,6 +3180,10 @@ static void ath12k_qmi_m3_free(struct ath12k_base *ab)
  {
  	struct m3_mem_region *m3_mem = &ab->qmi.m3_mem;
  
@@ -4026,7 +4005,7 @@ index 32049321917..054c3fb56a4 100644
  	if (ab->hw_params->fw.m3_loader == ath12k_m3_fw_loader_remoteproc)
  		return;
  
-@@ -3209,6 +3234,12 @@ static int ath12k_qmi_m3_load(struct ath12k_base *ab)
+@@ -3209,6 +3233,12 @@ static int ath12k_qmi_m3_load(struct ath12k_base *ab)
  			goto skip_m3_alloc;
  
  		/* Old buffer is too small, free and reallocate */
@@ -4039,7 +4018,7 @@ index 32049321917..054c3fb56a4 100644
  		ath12k_qmi_m3_free(ab);
  	}
  
-@@ -3261,6 +3292,9 @@ int ath12k_qmi_wlanfw_m3_info_send(struct ath12k_base *ab)
+@@ -3261,6 +3291,9 @@ int ath12k_qmi_wlanfw_m3_info_send(struct ath12k_base *ab)
  	if (ret < 0)
  		goto out;
  
@@ -4049,7 +4028,7 @@ index 32049321917..054c3fb56a4 100644
  	ret = qmi_send_request(&ab->qmi.handle, NULL, &txn,
  			       QMI_WLANFW_M3_INFO_REQ_V01,
  			       QMI_WLANFW_M3_INFO_REQ_MSG_V01_MAX_MSG_LEN,
-@@ -3292,6 +3326,10 @@ static void ath12k_qmi_aux_uc_free(struct ath12k_base *ab)
+@@ -3292,6 +3325,10 @@ static void ath12k_qmi_aux_uc_free(struct ath12k_base *ab)
  {
  	struct m3_mem_region *aux_uc_mem = &ab->qmi.aux_uc_mem;
  
@@ -4060,7 +4039,7 @@ index 32049321917..054c3fb56a4 100644
  	if (!aux_uc_mem->vaddr)
  		return;
  
-@@ -3339,6 +3377,12 @@ static int ath12k_qmi_aux_uc_load(struct ath12k_base *ab)
+@@ -3339,6 +3376,12 @@ static int ath12k_qmi_aux_uc_load(struct ath12k_base *ab)
  			goto copy;
  
  		/* Old buffer is too small, free and reallocate */
@@ -4073,7 +4052,7 @@ index 32049321917..054c3fb56a4 100644
  		ath12k_qmi_aux_uc_free(ab);
  	}
  
-@@ -3386,6 +3430,9 @@ int ath12k_qmi_wlanfw_aux_uc_info_send(struct ath12k_base *ab)
+@@ -3386,6 +3429,9 @@ int ath12k_qmi_wlanfw_aux_uc_info_send(struct ath12k_base *ab)
  	if (ret < 0)
  		goto out;
  
@@ -4083,7 +4062,7 @@ index 32049321917..054c3fb56a4 100644
  	ret = qmi_send_request(&ab->qmi.handle, NULL, &txn,
  			       QMI_WLANFW_AUX_UC_INFO_REQ_V01,
  			       QMI_WLANFW_AUX_UC_INFO_REQ_MSG_V01_MAX_MSG_LEN,
-@@ -3664,10 +3711,22 @@ ath12k_qmi_driver_event_post(struct ath12k_qmi *qmi,
+@@ -3664,10 +3710,22 @@ ath12k_qmi_driver_event_post(struct ath12k_qmi *qmi,
  	event->data = data;
  
  	spin_lock(&qmi->event_lock);
@@ -4106,7 +4085,7 @@ index 32049321917..054c3fb56a4 100644
  
  	return 0;
  }
-@@ -3773,6 +3832,14 @@ int ath12k_qmi_event_mem_request(struct ath12k_qmi *qmi)
+@@ -3773,6 +3831,14 @@ int ath12k_qmi_event_mem_request(struct ath12k_qmi *qmi)
  	struct ath12k_base *ab = qmi->ab;
  	int ret;
  
@@ -4121,7 +4100,7 @@ index 32049321917..054c3fb56a4 100644
  	ret = ath12k_qmi_respond_fw_mem_request(ab);
  	if (ret < 0) {
  		ath12k_warn(ab, "qmi failed to respond fw mem req:%d\n", ret);
-@@ -3844,9 +3911,34 @@ static void ath12k_qmi_msg_mem_request_cb(struct qmi_handle *qmi_hdl,
+@@ -3844,9 +3910,34 @@ static void ath12k_qmi_msg_mem_request_cb(struct qmi_handle *qmi_hdl,
  	ath12k_dbg(ab, ATH12K_DBG_QMI, "qmi firmware request memory request\n");
  
  	if (msg->mem_seg_len == 0 ||
@@ -4156,7 +4135,7 @@ index 32049321917..054c3fb56a4 100644
  
  	ab->qmi.mem_seg_count = msg->mem_seg_len;
  
-@@ -3857,6 +3949,7 @@ static void ath12k_qmi_msg_mem_request_cb(struct qmi_handle *qmi_hdl,
+@@ -3857,6 +3948,7 @@ static void ath12k_qmi_msg_mem_request_cb(struct qmi_handle *qmi_hdl,
  			   msg->mem_seg[i].type, msg->mem_seg[i].size);
  	}
  
@@ -4164,7 +4143,7 @@ index 32049321917..054c3fb56a4 100644
  	if (test_bit(ATH12K_FLAG_FIXED_MEM_REGION, &ab->dev_flags)) {
  		ret = ath12k_qmi_assign_target_mem_chunk(ab);
  		if (ret) {
-@@ -3872,6 +3965,9 @@ static void ath12k_qmi_msg_mem_request_cb(struct qmi_handle *qmi_hdl,
+@@ -3872,6 +3964,9 @@ static void ath12k_qmi_msg_mem_request_cb(struct qmi_handle *qmi_hdl,
  			return;
  		}
  	}
@@ -4174,7 +4153,7 @@ index 32049321917..054c3fb56a4 100644
  
  	ath12k_qmi_driver_event_post(qmi, ATH12K_QMI_EVENT_REQUEST_MEM, NULL);
  }
-@@ -3939,12 +4035,17 @@ static int ath12k_qmi_ops_new_server(struct qmi_handle *qmi_hdl,
+@@ -3939,12 +4034,17 @@ static int ath12k_qmi_ops_new_server(struct qmi_handle *qmi_hdl,
  	sq->sq_node = service->node;
  	sq->sq_port = service->port;
  
@@ -4192,7 +4171,7 @@ index 32049321917..054c3fb56a4 100644
  
  	ath12k_dbg(ab, ATH12K_DBG_QMI, "qmi wifi fw qmi service connected\n");
  	ath12k_qmi_driver_event_post(qmi, ATH12K_QMI_EVENT_SERVER_ARRIVE, NULL);
-@@ -3999,6 +4100,10 @@ static void ath12k_qmi_driver_event_work(struct work_struct *work)
+@@ -3999,6 +4099,10 @@ static void ath12k_qmi_driver_event_work(struct work_struct *work)
  
  		if (test_bit(ATH12K_FLAG_UNREGISTERING, &ab->dev_flags))
  			goto skip;
@@ -4203,22 +4182,14 @@ index 32049321917..054c3fb56a4 100644
  
  		switch (event->type) {
  		case ATH12K_QMI_EVENT_SERVER_ARRIVE:
-@@ -4064,16 +4169,34 @@ int ath12k_qmi_init_service(struct ath12k_base *ab)
+@@ -4064,16 +4168,26 @@ int ath12k_qmi_init_service(struct ath12k_base *ab)
  	ab->qmi.ab = ab;
  
  	ab->qmi.target_mem_mode = ab->target_mem_mode;
 +#if defined(__FreeBSD__)
-+#if defined(__FreeBSD__)
 +	ab->qmi.native_stopping = false;
-+	ret = ath12k_qmi_native_init(&ab->qmi.handle,
-+				    ath12k_pci_priv(ab)->mhi_ctrl,
-+#else
-+	ret = qmi_handle_init(&ab->qmi.handle,
 +#endif
-+			      ATH12K_QMI_RESP_LEN_MAX,
-+#else
  	ret = qmi_handle_init(&ab->qmi.handle, ATH12K_QMI_RESP_LEN_MAX,
-+#endif
  			      &ath12k_qmi_ops, ath12k_qmi_msg_handlers);
  	if (ret < 0) {
  		ath12k_warn(ab, "failed to initialize qmi handle\n");
@@ -4238,7 +4209,7 @@ index 32049321917..054c3fb56a4 100644
  		return -EFAULT;
  	}
  
-@@ -4087,20 +4210,68 @@ int ath12k_qmi_init_service(struct ath12k_base *ab)
+@@ -4087,20 +4201,66 @@ int ath12k_qmi_init_service(struct ath12k_base *ab)
  	if (ret < 0) {
  		ath12k_warn(ab, "failed to add qmi lookup\n");
  		destroy_workqueue(ab->qmi.event_wq);
@@ -4254,7 +4225,6 @@ index 32049321917..054c3fb56a4 100644
  }
  
 +#if defined(__FreeBSD__)
-+#if defined(__FreeBSD__)
 +int ath12k_qmi_stop_service(struct ath12k_base *ab)
 +{
 +	struct ath12k_qmi_driver_event *event;
@@ -4265,7 +4235,7 @@ index 32049321917..054c3fb56a4 100644
 +	spin_lock(&ab->qmi.event_lock);
 +	WRITE_ONCE(ab->qmi.native_stopping, true);
 +	spin_unlock(&ab->qmi.event_lock);
-+	ret = ath12k_qmi_native_stop(&ab->qmi.handle);
++	ret = linuxkpi_qmi_handle_stop(&ab->qmi.handle);
 +	if (ab->qmi.event_wq != NULL &&
 +	    current_work() != &ab->qmi.event_work) {
 +		cancel_work_sync(&ab->qmi.event_work);
@@ -4281,7 +4251,6 @@ index 32049321917..054c3fb56a4 100644
 +	return ret;
 +}
 +#endif
-+#endif
 +
  void ath12k_qmi_deinit_service(struct ath12k_base *ab)
  {
@@ -4294,7 +4263,7 @@ index 32049321917..054c3fb56a4 100644
 +#endif
  	qmi_handle_release(&ab->qmi.handle);
 +#if defined(__FreeBSD__)
-+	if (ab->qmi.handle.native != NULL) {
++	if (ab->qmi.handle.lkpi != NULL) {
 +		ath12k_pci_retain_owner(ab);
 +		return;
 +	}
@@ -4331,1129 +4300,11 @@ index b5a4a01391c..cf3de40e25d 100644
  int ath12k_qmi_firmware_start(struct ath12k_base *ab,
  			      u32 mode);
  void ath12k_qmi_firmware_stop(struct ath12k_base *ab);
-diff --git a/sys/contrib/dev/athk/ath12k/qmi_native.c b/sys/contrib/dev/athk/ath12k/qmi_native.c
-new file mode 100644
-index 00000000000..3205cf93dc5
---- /dev/null
-+++ b/sys/contrib/dev/athk/ath12k/qmi_native.c
-@@ -0,0 +1,623 @@
-+/*-
-+ * SPDX-License-Identifier: BSD-2-Clause
-+ *
-+ * Copyright (c) 2026 Diego Casati <diego.casati@gmail.com>
-+ *
-+ * Redistribution and use in source and binary forms, with or without
-+ * modification, are permitted provided that the following conditions
-+ * are met:
-+ * 1. Redistributions of source code must retain the above copyright
-+ *    notice, this list of conditions and the following disclaimer.
-+ * 2. Redistributions in binary form must reproduce the above copyright
-+ *    notice, this list of conditions and the following disclaimer in the
-+ *    documentation and/or other materials provided with the distribution.
-+ *
-+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
-+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
-+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
-+ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
-+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
-+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
-+ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
-+ * SUCH DAMAGE.
-+ */
-+
-+#include <sys/param.h>
-+#include <sys/endian.h>
-+#include <sys/kernel.h>
-+#include <sys/lock.h>
-+#include <sys/malloc.h>
-+#include <sys/mutex.h>
-+#include <sys/sx.h>
-+#include <sys/systm.h>
-+#include <sys/taskqueue.h>
-+#include <sys/time.h>
-+
-+#include <linux/jiffies.h>
-+#include <linux/socket.h>
-+#include "qmi_native.h"
-+
-+#define NATIVE_PACKET 8192
-+#define NATIVE_QUEUE 32
-+#define NATIVE_HOST 65536
-+#define QRTR_CONTROL 0xfffffffeU
-+#define QRTR_LOCAL_NODE 1
-+#define QRTR_LOCAL_PORT 0x4000
-+
-+static MALLOC_DEFINE(M_ATH12KQMI, "ath12kqmi", "ath12k direct QMI");
-+
-+struct native_packet {
-+	size_t length;
-+	uint8_t data[NATIVE_PACKET];
-+};
-+
-+struct ath12k_native_qmi {
-+	struct mtx lock;
-+	struct sx tx_lock;
-+	struct task task;
-+	struct qmi_handle *handle;
-+	struct mhi_controller *ctrl;
-+	struct qmi_txn *txn;
-+	struct native_packet queue[NATIVE_QUEUE];
-+	struct native_packet incoming;
-+	uint8_t transmit[NATIVE_PACKET];
-+	uint8_t decoded[NATIVE_HOST];
-+	unsigned int read, write, queued, users;
-+	uint32_t service, instance, node, port;
-+	uint16_t next_id;
-+	int error;
-+	bool lookup, discovered, stopping, hello_sent, worker_active;
-+};
-+
-+struct qmi_elem_info qmi_response_type_v01_ei[] = {
-+	{ .data_type = QMI_UNSIGNED_2_BYTE, .elem_len = 1, .elem_size = 2,
-+	  .offset = offsetof(struct qmi_response_type_v01, result) },
-+	{ .data_type = QMI_UNSIGNED_2_BYTE, .elem_len = 1, .elem_size = 2,
-+	  .offset = offsetof(struct qmi_response_type_v01, error) },
-+	{ .data_type = QMI_EOTI },
-+};
-+
-+static void
-+native_cancel_locked(struct ath12k_native_qmi *native, int error)
-+{
-+	struct qmi_txn *txn = native->txn;
-+
-+	mtx_assert(&native->lock, MA_OWNED);
-+	if (txn != NULL) {
-+		txn->result = -error;
-+		txn->done = true;
-+		native->txn = NULL;
-+		wakeup(txn);
-+	}
-+}
-+
-+static void
-+native_txn_put_locked(struct ath12k_native_qmi *native, struct qmi_txn *txn)
-+{
-+	mtx_assert(&native->lock, MA_OWNED);
-+	if (txn->active) {
-+		txn->active = false;
-+		txn->handle = NULL;
-+		KASSERT(native->users != 0, ("QMI transaction reference underflow"));
-+		native->users--;
-+		wakeup(native);
-+	}
-+}
-+
-+static int
-+native_submit(struct ath12k_native_qmi *native, size_t length)
-+{
-+	sbintime_t deadline = sbinuptime() + 5 * SBT_1S;
-+	int error;
-+	bool stopping;
-+
-+	sx_assert(&native->tx_lock, SA_XLOCKED);
-+	do {
-+		mtx_lock(&native->lock);
-+		stopping = native->stopping || native->error != 0;
-+		mtx_unlock(&native->lock);
-+		if (stopping)
-+			return (-ESHUTDOWN);
-+		error = linuxkpi_mhi_submit(native->ctrl, 20, native->transmit, length);
-+		if (error != -EBUSY)
-+			return (error);
-+		pause_sbt("qmiqueue", SBT_1MS, 0, C_HARDCLOCK);
-+	} while (sbinuptime() < deadline);
-+	return (-ETIMEDOUT);
-+}
-+
-+static void
-+native_header(uint8_t *packet, uint32_t type, uint32_t node,
-+    uint32_t port, uint32_t length)
-+{
-+	memset(packet, 0, 32);
-+	le32enc(packet, 1);
-+	le32enc(packet + 4, type);
-+	le32enc(packet + 8, QRTR_LOCAL_NODE);
-+	le32enc(packet + 12, type == 2 ? QRTR_CONTROL : QRTR_LOCAL_PORT);
-+	le32enc(packet + 20, length);
-+	le32enc(packet + 24, node);
-+	le32enc(packet + 28, port);
-+}
-+
-+static int
-+native_control(struct ath12k_native_qmi *native, uint32_t type,
-+    uint32_t node, uint32_t port)
-+{
-+	int error;
-+
-+	sx_xlock(&native->tx_lock);
-+	memset(native->transmit, 0, 52);
-+	native_header(native->transmit, type, node, port, 20);
-+	le32enc(native->transmit + 32, type);
-+	if (type == 7) {
-+		le32enc(native->transmit + 36, QRTR_LOCAL_NODE);
-+		le32enc(native->transmit + 40, QRTR_LOCAL_PORT);
-+	}
-+	error = native_submit(native, 52);
-+	sx_xunlock(&native->tx_lock);
-+	return (error);
-+}
-+
-+/* Called under the MHI mutex: copy now; decode, ACK and callbacks later. */
-+static int
-+native_receive(void *arg, const void *data, size_t length)
-+{
-+	struct ath12k_native_qmi *native = arg;
-+	struct native_packet *packet;
-+	int error = 0;
-+
-+	mtx_lock(&native->lock);
-+	if (native->stopping)
-+		goto out;
-+	if (length > NATIVE_PACKET || length < 16 ||
-+	    native->queued == NATIVE_QUEUE) {
-+		error = native->queued == NATIVE_QUEUE ? ENOBUFS : EMSGSIZE;
-+		native->error = error;
-+		native_cancel_locked(native, error);
-+		taskqueue_enqueue(taskqueue_thread, &native->task);
-+		goto out;
-+	}
-+	packet = &native->queue[native->write];
-+	memcpy(packet->data, data, length);
-+	packet->length = length;
-+	native->write = (native->write + 1) % NATIVE_QUEUE;
-+	native->queued++;
-+	taskqueue_enqueue(taskqueue_thread, &native->task);
-+out:
-+	mtx_unlock(&native->lock);
-+	return (error);
-+}
-+
-+static int
-+native_data(struct ath12k_native_qmi *native,
-+    const struct ath12k_qmi_native_frame *frame)
-+{
-+	const uint8_t *body = frame->body;
-+	size_t length = frame->length;
-+	uint32_t node = frame->node, port = frame->port;
-+	const struct qmi_msg_handler *handler;
-+	struct sockaddr_qrtr source = {
-+		.sq_family = AF_QIPCRTR, .sq_node = node, .sq_port = port,
-+	};
-+	struct qmi_txn *txn;
-+	size_t size;
-+	uint16_t id, message;
-+	int error = 0;
-+	unsigned int i;
-+
-+	if (length < 7 || le16dec(body + 5) != length - 7)
-+		return (EPROTO);
-+	id = le16dec(body + 1);
-+	message = le16dec(body + 3);
-+	mtx_lock(&native->lock);
-+	if (!native->discovered || node != native->node || port != native->port) {
-+		error = EPROTO;
-+		goto out;
-+	}
-+	if (body[0] == 2) {
-+		txn = native->txn;
-+		/* A cancelled/late response never touches a retired stack txn. */
-+		if (txn == NULL)
-+			goto out;
-+		error = -ath12k_qmi_native_reply(frame, native->node,
-+		    native->port, txn, native->decoded, txn->dest_size);
-+		if (error == ENOENT) {
-+			error = 0;
-+			goto out;
-+		}
-+		if (error == 0)
-+			memcpy(txn->dest, native->decoded, txn->dest_size);
-+		txn->result = -error;
-+		txn->done = true;
-+		native->txn = NULL;
-+		wakeup(txn);
-+		goto out;
-+	}
-+	handler = native->handle->handler;
-+	for (i = 0; i < 64 && handler[i].fn != NULL; i++)
-+		if (handler[i].type == QMI_INDICATION && handler[i].msg_id == message)
-+			break;
-+	if (i == 64) {
-+		error = E2BIG;
-+		goto out;
-+	}
-+	if (handler[i].fn == NULL)
-+		goto out;
-+	size = handler[i].decoded_size;
-+	if (size > sizeof(native->decoded)) {
-+		error = E2BIG;
-+		goto out;
-+	}
-+	error = -ath12k_qmi_native_decode(handler[i].ei, body + 7,
-+	    length - 7, native->decoded, size);
-+	if (error != 0)
-+		goto out;
-+	mtx_unlock(&native->lock);
-+	/* Taskqueue context; storage is owned by this single serialized task. */
-+	handler[i].fn(native->handle, &source, NULL, native->decoded);
-+	return (0);
-+out:
-+	if (error != 0)
-+		printf("ath12k QMI: rejected message %#x flags=%#x txn=%u "
-+		    "source=%u:%u expected=%u:%u discovered=%u error=%d\n",
-+		    message, body[0], id, node, port, native->node, native->port,
-+		    native->discovered, error);
-+	mtx_unlock(&native->lock);
-+	return (error);
-+}
-+
-+static int
-+native_packet(struct ath12k_native_qmi *native, const uint8_t *data, size_t length)
-+{
-+	struct ath12k_qmi_native_frame frame;
-+	struct qmi_service service;
-+	const uint8_t *body;
-+	uint32_t type, node, port;
-+	bool notify = false, reply = false, removed = false;
-+	int error = 0;
-+
-+	error = -ath12k_qmi_native_frame_decode(data, length, &frame);
-+	if (error != 0) {
-+		hexdump(data, min_t(size_t, length, 32),
-+		    "ath12k QMI: rejected QRTR header", HD_OMIT_CHARS);
-+		return (error);
-+	}
-+	type = frame.type;
-+	node = frame.node;
-+	port = frame.port;
-+	body = frame.body;
-+	if (type == 1) {
-+		error = native_data(native, &frame);
-+		if (error == 0 && frame.confirm != 0)
-+			error = -native_control(native, 7, node, port);
-+		return (error);
-+	}
-+	if (type == 7)
-+		return (0);
-+	mtx_lock(&native->lock);
-+	if (type == 2) {
-+		if (!native->hello_sent) {
-+			native->hello_sent = true;
-+			reply = true;
-+		}
-+	} else if (native->lookup && le32dec(body + 4) == native->service &&
-+	    le32dec(body + 8) == native->instance) {
-+		service.node = le32dec(body + 12);
-+		service.port = le32dec(body + 16);
-+		if (service.node != node || service.port == 0 ||
-+		    service.port >= QRTR_CONTROL ||
-+		    (native->discovered &&
-+		    (native->node != service.node || native->port != service.port))) {
-+			error = EPROTO;
-+		} else if (type == 5) {
-+			native->discovered = false;
-+			native_cancel_locked(native, ENXIO);
-+			removed = true;
-+		} else if (!native->discovered) {
-+			native->node = service.node;
-+			native->port = service.port;
-+			native->discovered = true;
-+			notify = true;
-+		}
-+	}
-+	mtx_unlock(&native->lock);
-+	if (reply)
-+		error = -native_control(native, 2, node, QRTR_CONTROL);
-+	if (notify && native->handle->ops.new_server != NULL)
-+		error = -native->handle->ops.new_server(native->handle, &service);
-+	if (removed && native->handle->ops.del_server != NULL)
-+		native->handle->ops.del_server(native->handle, &service);
-+	return (error);
-+}
-+
-+static void
-+native_work(void *arg, int pending __unused)
-+{
-+	struct ath12k_native_qmi *native = arg;
-+	int error;
-+
-+	mtx_lock(&native->lock);
-+	if (native->worker_active) {
-+		mtx_unlock(&native->lock);
-+		return;
-+	}
-+	native->worker_active = true;
-+	mtx_unlock(&native->lock);
-+	for (;;) {
-+		mtx_lock(&native->lock);
-+		if (native->queued == 0 || native->stopping || native->error != 0) {
-+			native->worker_active = false;
-+			mtx_unlock(&native->lock);
-+			return;
-+		}
-+		memcpy(&native->incoming, &native->queue[native->read],
-+		    sizeof(native->incoming));
-+		native->read = (native->read + 1) % NATIVE_QUEUE;
-+		native->queued--;
-+		mtx_unlock(&native->lock);
-+		error = native_packet(native, native->incoming.data,
-+		    native->incoming.length);
-+		if (error != 0) {
-+			mtx_lock(&native->lock);
-+			native->error = error;
-+			native_cancel_locked(native, error);
-+			native->worker_active = false;
-+			mtx_unlock(&native->lock);
-+			printf("ath12k QMI: native transport rejected packet: %d\n", error);
-+			return;
-+		}
-+	}
-+}
-+
-+static int
-+native_lookup(struct qmi_handle *handle, uint32_t service,
-+    uint32_t version, uint32_t instance)
-+{
-+	struct ath12k_native_qmi *native = handle->native;
-+
-+	if (service != 0x45 || version != 1 || instance > 0xffffff)
-+		return (-EOPNOTSUPP);
-+	mtx_lock(&native->lock);
-+	native->service = service;
-+	native->instance = (instance << 8) | version;
-+	native->lookup = true;
-+	mtx_unlock(&native->lock);
-+	return (0);
-+}
-+
-+static int
-+native_txn_init(struct qmi_handle *handle, struct qmi_txn *txn,
-+    const struct qmi_elem_info *ei, void *dest)
-+{
-+	struct ath12k_native_qmi *native = handle->native;
-+	size_t size = ath12k_qmi_native_size(ei);
-+	int error = 0;
-+
-+	if (ei == NULL || dest == NULL || size == 0 || size > NATIVE_HOST)
-+		return (-EINVAL);
-+	memset(txn, 0, sizeof(*txn));
-+	mtx_lock(&native->lock);
-+	if (native->stopping || native->error != 0 || !native->discovered)
-+		error = -ENXIO;
-+	else if (native->txn != NULL)
-+		error = -EBUSY;
-+	else if (native->next_id == UINT16_MAX)
-+		error = -EOVERFLOW;
-+	else {
-+		txn->handle = handle;
-+		txn->ei = ei;
-+		txn->dest = dest;
-+		txn->dest_size = size;
-+		txn->id = ++native->next_id;
-+		txn->active = true;
-+		native->users++;
-+		native->txn = txn;
-+	}
-+	mtx_unlock(&native->lock);
-+	return (error);
-+}
-+
-+static void
-+native_txn_cancel(struct qmi_txn *txn)
-+{
-+	struct ath12k_native_qmi *native = txn->handle->native;
-+
-+	mtx_lock(&native->lock);
-+	if (native->txn == txn)
-+		native_cancel_locked(native, ECANCELED);
-+	native_txn_put_locked(native, txn);
-+	mtx_unlock(&native->lock);
-+}
-+
-+static int
-+native_txn_wait(struct qmi_txn *txn, uint64_t ticks)
-+{
-+	struct ath12k_native_qmi *native = txn->handle->native;
-+	sbintime_t deadline;
-+	int error = 0;
-+
-+	if (ticks == 0 || ticks > 30ULL * hz) {
-+		native_txn_cancel(txn);
-+		return (-EINVAL);
-+	}
-+	deadline = sbinuptime() + ticks * SBT_1S / hz;
-+	mtx_lock(&native->lock);
-+	while (!txn->done && native->txn == txn) {
-+		error = msleep_sbt(txn, &native->lock, 0, "qmitxn", deadline,
-+		    0, C_ABSOLUTE);
-+		if (error != 0) {
-+			native_cancel_locked(native, error == EWOULDBLOCK ?
-+			    ETIMEDOUT : error);
-+			break;
-+		}
-+	}
-+	error = txn->done ? txn->result : -ECANCELED;
-+	native_txn_put_locked(native, txn);
-+	mtx_unlock(&native->lock);
-+	return (error);
-+}
-+
-+static int
-+native_send(struct qmi_handle *handle, struct qmi_txn *txn, uint32_t message,
-+    size_t maximum, const struct qmi_elem_info *ei, const void *request)
-+{
-+	struct ath12k_native_qmi *native = handle->native;
-+	size_t length, total;
-+	uint32_t node, port;
-+	int error;
-+
-+	if (message > UINT16_MAX || maximum > NATIVE_PACKET - 39)
-+		return (-EMSGSIZE);
-+	sx_xlock(&native->tx_lock);
-+	mtx_lock(&native->lock);
-+	if (native->txn != txn || txn->sent || native->stopping ||
-+	    !native->discovered || native->error != 0) {
-+		mtx_unlock(&native->lock);
-+		sx_xunlock(&native->tx_lock);
-+		return (-ENXIO);
-+	}
-+	node = native->node;
-+	port = native->port;
-+	mtx_unlock(&native->lock);
-+	memset(native->transmit, 0, sizeof(native->transmit));
-+	error = ath12k_qmi_native_encode(ei, request, native->transmit + 39,
-+	    maximum, &length);
-+	if (error != 0)
-+		goto out;
-+	total = roundup2(39 + length, 4);
-+	native_header(native->transmit, 1, node, port, 7 + length);
-+	native->transmit[32] = 0;
-+	le16enc(native->transmit + 33, txn->id);
-+	le16enc(native->transmit + 35, message);
-+	le16enc(native->transmit + 37, length);
-+	mtx_lock(&native->lock);
-+	if (native->txn != txn || txn->done) {
-+		mtx_unlock(&native->lock);
-+		error = -ECANCELED;
-+		goto out;
-+	}
-+	txn->message = message;
-+	txn->sent = true;
-+	mtx_unlock(&native->lock);
-+	error = native_submit(native, total);
-+out:
-+	sx_xunlock(&native->tx_lock);
-+	return (error);
-+}
-+
-+int
-+ath12k_qmi_native_stop(struct qmi_handle *handle)
-+{
-+	struct ath12k_native_qmi *native = handle->native;
-+	sbintime_t deadline;
-+	int error = 0;
-+
-+	if (native == NULL)
-+		return (0);
-+	mtx_lock(&native->lock);
-+	native->stopping = true;
-+	native_cancel_locked(native, ESHUTDOWN);
-+	mtx_unlock(&native->lock);
-+	/* Caller must not hold the ath12k QMI event-workqueue mutex. */
-+	taskqueue_drain(taskqueue_thread, &native->task);
-+	sx_xlock(&native->tx_lock);
-+	sx_xunlock(&native->tx_lock);
-+	deadline = sbinuptime() + 5 * SBT_1S;
-+	mtx_lock(&native->lock);
-+	while (native->users != 0) {
-+		error = msleep_sbt(native, &native->lock, 0, "qmiusers",
-+		    deadline, 0, C_ABSOLUTE);
-+		if (error != 0)
-+			break;
-+	}
-+	mtx_unlock(&native->lock);
-+	return (error != 0 ? -ETIMEDOUT : 0);
-+}
-+
-+static void
-+native_release(struct qmi_handle *handle)
-+{
-+	struct ath12k_native_qmi *native = handle->native;
-+
-+	if (ath12k_qmi_native_stop(handle) != 0) {
-+		printf("ath12k QMI: retaining outstanding transaction owner\n");
-+		return;
-+	}
-+	if (linuxkpi_mhi_set_receive(native->ctrl, NULL, NULL) != 0) {
-+		printf("ath12k QMI: retaining receive owner until verified reset\n");
-+		return;
-+	}
-+	sx_destroy(&native->tx_lock);
-+	mtx_destroy(&native->lock);
-+	free(native, M_ATH12KQMI);
-+	handle->native = NULL;
-+	handle->native_ops = NULL;
-+}
-+
-+static const struct qmi_native_ops native_ops = {
-+	.lookup = native_lookup,
-+	.release = native_release,
-+	.send = native_send,
-+	.init = native_txn_init,
-+	.cancel = native_txn_cancel,
-+	.wait = native_txn_wait,
-+};
-+
-+int
-+ath12k_qmi_native_init(struct qmi_handle *handle, struct mhi_controller *ctrl,
-+    size_t maximum, const struct qmi_ops *ops,
-+    const struct qmi_msg_handler *handlers)
-+{
-+	struct ath12k_native_qmi *native;
-+	int error;
-+
-+	if (handle->native != NULL || ctrl == NULL || ops == NULL ||
-+	    handlers == NULL || maximum > NATIVE_PACKET)
-+		return (-EINVAL);
-+	native = malloc(sizeof(*native), M_ATH12KQMI, M_WAITOK | M_ZERO);
-+	mtx_init(&native->lock, "ath12k QMI", NULL, MTX_DEF);
-+	sx_init(&native->tx_lock, "ath12k QMI transmit");
-+	TASK_INIT(&native->task, 0, native_work, native);
-+	native->handle = handle;
-+	native->ctrl = ctrl;
-+	handle->ops = *ops;
-+	handle->handler = handlers;
-+	handle->native = native;
-+	handle->native_ops = &native_ops;
-+	error = linuxkpi_mhi_set_receive(ctrl, native_receive, native);
-+	if (error != 0) {
-+		handle->native = NULL;
-+		handle->native_ops = NULL;
-+		sx_destroy(&native->tx_lock);
-+		mtx_destroy(&native->lock);
-+		free(native, M_ATH12KQMI);
-+	}
-+	return (error);
-+}
-+
-+int
-+ath12k_qmi_native_hello(struct qmi_handle *handle)
-+{
-+	struct ath12k_native_qmi *native = handle->native;
-+
-+	if (native == NULL)
-+		return (-ENXIO);
-+	mtx_lock(&native->lock);
-+	if (!native->lookup || native->error != 0) {
-+		mtx_unlock(&native->lock);
-+		return (-ENXIO);
-+	}
-+	native->stopping = false;
-+	if (native->hello_sent) {
-+		mtx_unlock(&native->lock);
-+		return (0);
-+	}
-+	native->hello_sent = true;
-+	mtx_unlock(&native->lock);
-+	/* The exercised OpenBSD/WCN7850 link-local QRTR peer, not a socket route. */
-+	return (native_control(native, 2, 7, QRTR_CONTROL));
-+}
-diff --git a/sys/contrib/dev/athk/ath12k/qmi_native.h b/sys/contrib/dev/athk/ath12k/qmi_native.h
-new file mode 100644
-index 00000000000..8c95b1fde73
---- /dev/null
-+++ b/sys/contrib/dev/athk/ath12k/qmi_native.h
-@@ -0,0 +1,56 @@
-+/*-
-+ * SPDX-License-Identifier: BSD-2-Clause
-+ *
-+ * Copyright (c) 2026 Diego Casati <diego.casati@gmail.com>
-+ *
-+ * Redistribution and use in source and binary forms, with or without
-+ * modification, are permitted provided that the following conditions
-+ * are met:
-+ * 1. Redistributions of source code must retain the above copyright
-+ *    notice, this list of conditions and the following disclaimer.
-+ * 2. Redistributions in binary form must reproduce the above copyright
-+ *    notice, this list of conditions and the following disclaimer in the
-+ *    documentation and/or other materials provided with the distribution.
-+ *
-+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
-+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
-+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
-+ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
-+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
-+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
-+ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
-+ * SUCH DAMAGE.
-+ */
-+
-+#ifndef ATH12K_QMI_NATIVE_H
-+#define ATH12K_QMI_NATIVE_H
-+
-+#include <linux/mhi.h>
-+#include <linux/soc/qcom/qmi.h>
-+
-+int ath12k_qmi_native_init(struct qmi_handle *, struct mhi_controller *,
-+    size_t, const struct qmi_ops *, const struct qmi_msg_handler *);
-+int ath12k_qmi_native_stop(struct qmi_handle *);
-+int ath12k_qmi_native_hello(struct qmi_handle *);
-+
-+size_t ath12k_qmi_native_size(const struct qmi_elem_info *);
-+int ath12k_qmi_native_encode(const struct qmi_elem_info *, const void *,
-+    void *, size_t, size_t *);
-+int ath12k_qmi_native_decode(const struct qmi_elem_info *, const void *,
-+    size_t, void *, size_t);
-+
-+struct ath12k_qmi_native_frame {
-+	uint32_t type, node, port, destination_node, destination_port, confirm;
-+	const uint8_t *body;
-+	size_t length;
-+};
-+
-+int ath12k_qmi_native_frame_decode(const void *, size_t,
-+    struct ath12k_qmi_native_frame *);
-+int ath12k_qmi_native_reply(const struct ath12k_qmi_native_frame *,
-+    uint32_t, uint32_t, const struct qmi_txn *, void *, size_t);
-+
-+#endif
-diff --git a/sys/contrib/dev/athk/ath12k/qmi_native_codec.c b/sys/contrib/dev/athk/ath12k/qmi_native_codec.c
-new file mode 100644
-index 00000000000..a67abb925ab
---- /dev/null
-+++ b/sys/contrib/dev/athk/ath12k/qmi_native_codec.c
-@@ -0,0 +1,421 @@
-+/*-
-+ * SPDX-License-Identifier: BSD-2-Clause
-+ *
-+ * Copyright (c) 2026 Diego Casati <diego.casati@gmail.com>
-+ *
-+ * Redistribution and use in source and binary forms, with or without
-+ * modification, are permitted provided that the following conditions
-+ * are met:
-+ * 1. Redistributions of source code must retain the above copyright
-+ *    notice, this list of conditions and the following disclaimer.
-+ * 2. Redistributions in binary form must reproduce the above copyright
-+ *    notice, this list of conditions and the following disclaimer in the
-+ *    documentation and/or other materials provided with the distribution.
-+ *
-+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
-+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
-+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
-+ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
-+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
-+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
-+ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
-+ * SUCH DAMAGE.
-+ */
-+
-+#include <sys/param.h>
-+#include <sys/endian.h>
-+#include <sys/systm.h>
-+
-+#include "qmi_native.h"
-+
-+#define QMI_SCHEMA_MAX 256
-+#define QMI_HOST_MAX 65536
-+#define QMI_DEPTH_MAX 8
-+
-+size_t
-+ath12k_qmi_native_size(const struct qmi_elem_info *ei)
-+{
-+	size_t end, size = 0, width;
-+	unsigned int i;
-+
-+	if (ei == NULL)
-+		return (0);
-+	for (i = 0; i < QMI_SCHEMA_MAX && ei[i].data_type != QMI_EOTI; i++) {
-+		width = ei[i].data_type == QMI_DATA_LEN ? sizeof(uint32_t) :
-+		    (size_t)ei[i].elem_size * ei[i].elem_len;
-+		if (width == 0 || width > QMI_HOST_MAX ||
-+		    ei[i].offset > QMI_HOST_MAX - width)
-+			return (0);
-+		end = ei[i].offset + width;
-+		size = MAX(size, end);
-+	}
-+	return (i == QMI_SCHEMA_MAX ? 0 : size);
-+}
-+
-+static unsigned int
-+qmi_width(enum soc_qcom_qmi_data_type type)
-+{
-+	switch (type) {
-+	case QMI_UNSIGNED_1_BYTE: return (1);
-+	case QMI_UNSIGNED_2_BYTE: return (2);
-+	case QMI_UNSIGNED_4_BYTE:
-+	case QMI_SIGNED_4_BYTE_ENUM: return (4);
-+	case QMI_UNSIGNED_8_BYTE: return (8);
-+	default: return (0);
-+	}
-+}
-+
-+static uint64_t
-+qmi_get(const void *p, unsigned int width)
-+{
-+	switch (width) {
-+	case 1: return (*(const uint8_t *)p);
-+	case 2: return (le16dec(p));
-+	case 4: return (le32dec(p));
-+	default: return (le64dec(p));
-+	}
-+}
-+
-+static void
-+qmi_put(void *p, uint64_t value, unsigned int width)
-+{
-+	switch (width) {
-+	case 1: *(uint8_t *)p = value; break;
-+	case 2: le16enc(p, value); break;
-+	case 4: le32enc(p, value); break;
-+	default: le64enc(p, value); break;
-+	}
-+}
-+
-+static uint64_t
-+qmi_host_get(const void *p, unsigned int width)
-+{
-+	uint8_t a;
-+	uint16_t b;
-+	uint32_t c;
-+	uint64_t d;
-+
-+	switch (width) {
-+	case 1: memcpy(&a, p, 1); return (a);
-+	case 2: memcpy(&b, p, 2); return (b);
-+	case 4: memcpy(&c, p, 4); return (c);
-+	default: memcpy(&d, p, 8); return (d);
-+	}
-+}
-+
-+static void
-+qmi_host_put(void *p, uint64_t value, unsigned int width)
-+{
-+	uint8_t a = value;
-+	uint16_t b = value;
-+	uint32_t c = value;
-+
-+	switch (width) {
-+	case 1: memcpy(p, &a, 1); break;
-+	case 2: memcpy(p, &b, 2); break;
-+	case 4: memcpy(p, &c, 4); break;
-+	default: memcpy(p, &value, 8); break;
-+	}
-+}
-+
-+/*
-+ * Top-level fields share a TLV header. Nested structs contain packed fields,
-+ * not C padding or TLV headers; DATA_LEN occupies u32 in host structures.
-+ */
-+static int
-+qmi_fields(const struct qmi_elem_info *ei, unsigned int count,
-+    uint8_t *host, size_t host_size, uint8_t *wire, size_t capacity,
-+    size_t *used, bool decode, bool validate, unsigned int depth, bool nested)
-+{
-+	size_t pos = 0, n, bytes, sub, host_width;
-+	uint32_t variable = 0;
-+	bool have_variable = false;
-+	unsigned int i, j, width;
-+	uint64_t value;
-+	int error;
-+
-+	if (depth > QMI_DEPTH_MAX)
-+		return (E2BIG);
-+	for (i = 0; i < count && ei[i].data_type != QMI_EOTI; i++) {
-+		const struct qmi_elem_info *e = &ei[i];
-+
-+		n = e->array_type == VAR_LEN_ARRAY ? variable : e->elem_len;
-+		if (e->array_type == VAR_LEN_ARRAY &&
-+		    (!have_variable || n > e->elem_len))
-+			return (EINVAL);
-+		host_width = e->data_type == QMI_DATA_LEN ? sizeof(uint32_t) :
-+		    (size_t)e->elem_size * n;
-+		if (e->offset > host_size || host_width > host_size - e->offset)
-+			return (EMSGSIZE);
-+		if (e->data_type == QMI_OPT_FLAG) {
-+			if (!decode || e->elem_size != 1)
-+				return (EINVAL);
-+			if (!validate)
-+				host[e->offset] = 1;
-+			continue;
-+		}
-+		if (e->data_type == QMI_DATA_LEN) {
-+			width = e->elem_size;
-+			if ((width != 1 && width != 2) || capacity - pos < width)
-+				return (EMSGSIZE);
-+			if (decode)
-+				variable = qmi_get(wire + pos, width);
-+			else {
-+				memcpy(&variable, host + e->offset, sizeof(variable));
-+				if (variable > (width == 1 ? UINT8_MAX : UINT16_MAX))
-+					return (ERANGE);
-+				qmi_put(wire + pos, variable, width);
-+			}
-+			if (decode && !validate)
-+				memcpy(host + e->offset, &variable, sizeof(variable));
-+			have_variable = true;
-+			pos += width;
-+			continue;
-+		}
-+		if (e->data_type == QMI_STRING) {
-+			if (e->elem_size != 1 || e->elem_len == 0)
-+				return (EINVAL);
-+			width = nested ? (e->elem_len <= UINT8_MAX ? 1 : 2) : 0;
-+			if (capacity - pos < width)
-+				return (EMSGSIZE);
-+			if (decode)
-+				n = nested ? qmi_get(wire + pos, width) : capacity - pos;
-+			else {
-+				n = strnlen((char *)host + e->offset, e->elem_len);
-+				if (nested)
-+					qmi_put(wire + pos, n, width);
-+			}
-+			pos += width;
-+			if (n >= e->elem_len || n > capacity - pos)
-+				return (EMSGSIZE);
-+			if (!validate) {
-+				if (decode) {
-+					memcpy(host + e->offset, wire + pos, n);
-+					host[e->offset + n] = 0;
-+				} else
-+					memcpy(wire + pos, host + e->offset, n);
-+			}
-+			pos += n;
-+			continue;
-+		}
-+		if (e->data_type == QMI_STRUCT) {
-+			if (e->ei_array == NULL ||
-+			    ath12k_qmi_native_size(e->ei_array) > e->elem_size)
-+				return (EINVAL);
-+			for (j = 0; j < n; j++) {
-+				error = qmi_fields(e->ei_array, QMI_SCHEMA_MAX,
-+				    validate ? NULL : host + e->offset + j * e->elem_size,
-+				    e->elem_size, wire + pos, capacity - pos, &sub,
-+				    decode, validate, depth + 1, true);
-+				if (error != 0)
-+					return (error);
-+				pos += sub;
-+			}
-+			continue;
-+		}
-+		width = qmi_width(e->data_type);
-+		if (width == 0 || width != e->elem_size || n > SIZE_MAX / width)
-+			return (EINVAL);
-+		bytes = n * width;
-+		if (bytes > capacity - pos)
-+			return (EMSGSIZE);
-+		if (!validate) {
-+			for (j = 0; j < n; j++) {
-+				if (decode) {
-+					value = qmi_get(wire + pos + j * width, width);
-+					qmi_host_put(host + e->offset + j * width,
-+					    value, width);
-+				} else {
-+					value = qmi_host_get(host + e->offset + j * width,
-+					    width);
-+					qmi_put(wire + pos + j * width, value, width);
-+				}
-+			}
-+		}
-+		pos += bytes;
-+	}
-+	if (i == QMI_SCHEMA_MAX)
-+		return (E2BIG);
-+	*used = pos;
-+	return (0);
-+}
-+
-+int
-+ath12k_qmi_native_encode(const struct qmi_elem_info *ei, const void *host,
-+    void *output, size_t capacity, size_t *length)
-+{
-+	uint8_t *wire = output;
-+	size_t size, pos = 0, used;
-+	unsigned int i = 0, end, first;
-+	int error;
-+
-+	if (ei == NULL || host == NULL || output == NULL || length == NULL)
-+		return (-EINVAL);
-+	size = ath12k_qmi_native_size(ei);
-+	while (i < QMI_SCHEMA_MAX && ei[i].data_type != QMI_EOTI) {
-+		first = i;
-+		for (end = i + 1; end < QMI_SCHEMA_MAX &&
-+		    ei[end].data_type != QMI_EOTI &&
-+		    ei[end].tlv_type == ei[i].tlv_type; end++)
-+			;
-+		i = end;
-+		if (ei[first].data_type == QMI_OPT_FLAG) {
-+			if (!*((const uint8_t *)host + ei[first].offset))
-+				continue;
-+			first++;
-+		}
-+		if (first == end || pos > capacity || capacity - pos < 3)
-+			return (-EMSGSIZE);
-+		error = qmi_fields(ei + first, end - first, __DECONST(uint8_t *, host),
-+		    size, wire + pos + 3, capacity - pos - 3, &used, false,
-+		    false, 0, false);
-+		if (error != 0)
-+			return (-error);
-+		if (used > UINT16_MAX)
-+			return (-EMSGSIZE);
-+		wire[pos] = ei[first].tlv_type;
-+		le16enc(wire + pos + 1, used);
-+		pos += 3 + used;
-+	}
-+	if (i == QMI_SCHEMA_MAX)
-+		return (-E2BIG);
-+	*length = pos;
-+	return (0);
-+}
-+
-+static int
-+qmi_decode_pass(const struct qmi_elem_info *ei, const uint8_t *input,
-+    size_t length, void *output, size_t size, bool validate)
-+{
-+	bool seen[256] = { false };
-+	size_t pos = 0, bytes, used;
-+	unsigned int i, end;
-+	uint8_t type;
-+	int error;
-+
-+	while (pos < length) {
-+		if (length - pos < 3)
-+			return (EMSGSIZE);
-+		type = input[pos];
-+		bytes = le16dec(input + pos + 1);
-+		pos += 3;
-+		if (bytes > length - pos || seen[type])
-+			return (EBADMSG);
-+		seen[type] = true;
-+		for (i = 0; i < QMI_SCHEMA_MAX && ei[i].data_type != QMI_EOTI; i++)
-+			if (ei[i].tlv_type == type)
-+				break;
-+		if (i == QMI_SCHEMA_MAX)
-+			return (E2BIG);
-+		if (ei[i].data_type != QMI_EOTI) {
-+			for (end = i + 1; end < QMI_SCHEMA_MAX &&
-+			    ei[end].data_type != QMI_EOTI &&
-+			    ei[end].tlv_type == type; end++)
-+				;
-+			error = qmi_fields(ei + i, end - i, output, size,
-+			    __DECONST(uint8_t *, input + pos), bytes, &used,
-+			    true, validate, 0, false);
-+			if (error != 0 || used != bytes)
-+				return (error != 0 ? error : EBADMSG);
-+		}
-+		pos += bytes;
-+	}
-+	for (i = 0; i < QMI_SCHEMA_MAX && ei[i].data_type != QMI_EOTI;) {
-+		if (ei[i].data_type != QMI_OPT_FLAG && !seen[ei[i].tlv_type])
-+			return (ENOMSG);
-+		for (end = i + 1; end < QMI_SCHEMA_MAX &&
-+		    ei[end].data_type != QMI_EOTI &&
-+		    ei[end].tlv_type == ei[i].tlv_type; end++)
-+			;
-+		i = end;
-+	}
-+	return (i == QMI_SCHEMA_MAX ? E2BIG : 0);
-+}
-+
-+int
-+ath12k_qmi_native_decode(const struct qmi_elem_info *ei, const void *input,
-+    size_t length, void *output, size_t size)
-+{
-+	int error;
-+
-+	if (ei == NULL || input == NULL || output == NULL ||
-+	    ath12k_qmi_native_size(ei) > size || size > QMI_HOST_MAX)
-+		return (-EINVAL);
-+	error = qmi_decode_pass(ei, input, length, NULL, size, true);
-+	if (error != 0)
-+		return (-error);
-+	memset(output, 0, size);
-+	return (-qmi_decode_pass(ei, input, length, output, size, false));
-+}
-+
-+int
-+ath12k_qmi_native_frame_decode(const void *input, size_t length,
-+    struct ath12k_qmi_native_frame *output)
-+{
-+	const uint8_t *data = input;
-+	struct ath12k_qmi_native_frame frame;
-+	size_t header;
-+	uint32_t size;
-+
-+	if (data == NULL || output == NULL)
-+		return (-EINVAL);
-+	if (length >= 32 && le32dec(data) == 1) {
-+		header = 32;
-+		frame.type = le32dec(data + 4);
-+		frame.node = le32dec(data + 8);
-+		frame.port = le32dec(data + 12);
-+		frame.confirm = le32dec(data + 16);
-+		size = le32dec(data + 20);
-+		frame.destination_node = le32dec(data + 24);
-+		frame.destination_port = le32dec(data + 28);
-+	} else if (length >= 16 && data[0] == 3 && data[3] == 0 &&
-+	    (data[2] & ~1U) == 0) {
-+		header = 16;
-+		frame.type = data[1];
-+		frame.confirm = data[2] & 1;
-+		size = le32dec(data + 4);
-+		frame.node = le16dec(data + 8);
-+		frame.port = le16dec(data + 10);
-+		frame.destination_node = le16dec(data + 12);
-+		frame.destination_port = le16dec(data + 14);
-+	} else
-+		return (-EPROTONOSUPPORT);
-+	if (size > length - header ||
-+	    (length != header + size && length != roundup2(header + size, 4)) ||
-+	    frame.confirm > 1 || frame.node == 0 || frame.node == UINT32_MAX)
-+		return (-EPROTO);
-+	frame.body = data + header;
-+	frame.length = size;
-+	if (frame.type == 1) {
-+		if (frame.destination_node != 1 || frame.destination_port != 0x4000 ||
-+		    size < 7 || le16dec(frame.body + 5) != size - 7 ||
-+		    (frame.body[0] != 2 && frame.body[0] != QMI_INDICATION))
-+			return (-EPROTO);
-+	} else if ((frame.type != 2 && frame.type != 4 && frame.type != 5 &&
-+	    frame.type != 7) || size != 20 || le32dec(frame.body) != frame.type)
-+		return (-EPROTO);
-+	*output = frame;
-+	return (0);
-+}
-+
-+int
-+ath12k_qmi_native_reply(const struct ath12k_qmi_native_frame *frame,
-+    uint32_t node, uint32_t port, const struct qmi_txn *txn,
-+    void *output, size_t size)
-+{
-+	if (frame == NULL || txn == NULL || frame->body == NULL || frame->type != 1 ||
-+	    frame->node != node || frame->port != port ||
-+	    frame->destination_node != 1 || frame->destination_port != 0x4000 ||
-+	    frame->length < 7 || frame->body[0] != 2 ||
-+	    le16dec(frame->body + 5) != frame->length - 7)
-+		return (-EPROTO);
-+	if (!txn->active || !txn->sent || txn->done ||
-+	    le16dec(frame->body + 1) != txn->id ||
-+	    le16dec(frame->body + 3) != txn->message)
-+		return (-ENOENT);
-+	return (ath12k_qmi_native_decode(txn->ei, frame->body + 7,
-+	    frame->length - 7, output, size));
-+}
 diff --git a/sys/contrib/dev/athk/ath12k/reg.c b/sys/contrib/dev/athk/ath12k/reg.c
-index 412b98e5787..fee65f0680f 100644
+index 412b98e5787..659f52f3c90 100644
 --- a/sys/contrib/dev/athk/ath12k/reg.c
 +++ b/sys/contrib/dev/athk/ath12k/reg.c
-@@ -29,6 +29,242 @@ static const struct ieee80211_regdomain ath12k_world_regd = {
+@@ -29,6 +29,247 @@ static const struct ieee80211_regdomain ath12k_world_regd = {
  	}
  };
  
@@ -5539,11 +4390,13 @@ index 412b98e5787..fee65f0680f 100644
 +		IEEE80211_CHAN_NO_EHT | IEEE80211_CHAN_NO_IR |
 +		IEEE80211_CHAN_RADAR;
 +
++	/* Only 5 GHz may widen to HT40/VHT80; 160 MHz stays disabled. */
 +	if ((channel->band != NL80211_BAND_2GHZ &&
 +	     channel->band != NL80211_BAND_5GHZ) ||
 +	    (channel->flags & ~allowed_flags) ||
-+	    (channel->flags & IEEE80211_CHAN_NO_HT40) != IEEE80211_CHAN_NO_HT40 ||
-+	    !(channel->flags & IEEE80211_CHAN_NO_80MHZ) ||
++	    (channel->band == NL80211_BAND_2GHZ &&
++	     ((channel->flags & IEEE80211_CHAN_NO_HT40) != IEEE80211_CHAN_NO_HT40 ||
++	      !(channel->flags & IEEE80211_CHAN_NO_80MHZ))) ||
 +	    !(channel->flags & IEEE80211_CHAN_NO_160MHZ))
 +		return -EOPNOTSUPP;
 +	if (channel->max_power < 1 || channel->max_power > 63 ||
@@ -5560,7 +4413,10 @@ index 412b98e5787..fee65f0680f 100644
 +	ch->maxpower = channel->max_power * 2;
 +	ch->maxregpower = channel->max_reg_power * 2;
 +	ch->antennamax = channel->max_antenna_gain * 2;
-+	/* HT/VHT may operate at 20 MHz; never advertise HE/EHT/6 GHz here. */
++	/*
++	 * Scan list entries are 20 MHz; vdev start sets the operating width.
++	 * Never advertise HE/EHT/6 GHz here.
++	 */
 +	ch->allow_ht = true;
 +	ch->allow_vht = true;
 +	ch->phy_mode = channel->band == NL80211_BAND_2GHZ ?
@@ -5696,7 +4552,7 @@ index 412b98e5787..fee65f0680f 100644
  static bool ath12k_regdom_changes(struct ieee80211_hw *hw, char *alpha2)
  {
  	const struct ieee80211_regdomain *regd;
-@@ -86,6 +322,16 @@ ath12k_reg_notifier(struct wiphy *wiphy, struct regulatory_request *request)
+@@ -86,6 +327,16 @@ ath12k_reg_notifier(struct wiphy *wiphy, struct regulatory_request *request)
  		return;
  	}
  
@@ -5713,7 +4569,7 @@ index 412b98e5787..fee65f0680f 100644
  	if (!IS_ENABLED(CONFIG_ATH_REG_DYNAMIC_USER_REG_HINTS)) {
  		ath12k_dbg(ar->ab, ATH12K_DBG_REG,
  			   "Country Setting is not allowed\n");
-@@ -141,6 +387,19 @@ int ath12k_reg_update_chan_list(struct ath12k *ar, bool wait)
+@@ -141,6 +392,19 @@ int ath12k_reg_update_chan_list(struct ath12k *ar, bool wait)
  	int num_channels = 0;
  	int i, ret = 0;
  
@@ -5733,7 +4589,7 @@ index 412b98e5787..fee65f0680f 100644
  	if (ar->ah->state == ATH12K_HW_STATE_RESTARTING)
  		return 0;
  
-@@ -285,8 +544,14 @@ int ath12k_regd_update(struct ath12k *ar, bool init)
+@@ -285,8 +549,14 @@ int ath12k_regd_update(struct ath12k *ar, bool init)
  	int ret, regd_len, pdev_id;
  	struct ath12k_base *ab;
  	long time_left;
@@ -5748,7 +4604,7 @@ index 412b98e5787..fee65f0680f 100644
  
  	time_left = wait_for_completion_timeout(&ar->regd_update_completed,
  						ATH12K_REG_UPDATE_TIMEOUT_HZ);
-@@ -319,7 +584,12 @@ int ath12k_regd_update(struct ath12k *ar, bool init)
+@@ -319,7 +589,12 @@ int ath12k_regd_update(struct ath12k *ar, bool init)
  		ath12k_mac_update_freq_range(ar, freq_low, freq_high);
  	}
  
@@ -5761,7 +4617,7 @@ index 412b98e5787..fee65f0680f 100644
  		if (ab->hw_params->single_pdev_only) {
  			phy_id = ar->pdev->cap.band[WMI_HOST_WLAN_5GHZ_CAP].phy_id;
  			reg_cap = &ab->hal_reg_cap[phy_id];
-@@ -331,7 +601,12 @@ int ath12k_regd_update(struct ath12k *ar, bool init)
+@@ -331,7 +606,12 @@ int ath12k_regd_update(struct ath12k *ar, bool init)
  		ath12k_mac_update_freq_range(ar, freq_low, freq_high);
  	}
  
@@ -5774,7 +4630,7 @@ index 412b98e5787..fee65f0680f 100644
  		freq_low = max(reg_cap->low_5ghz_chan, ab->reg_freq_6ghz.start_freq);
  		freq_high = min(reg_cap->high_5ghz_chan, ab->reg_freq_6ghz.end_freq);
  
-@@ -372,6 +647,13 @@ int ath12k_regd_update(struct ath12k *ar, bool init)
+@@ -372,6 +652,13 @@ int ath12k_regd_update(struct ath12k *ar, bool init)
  		} else {
  			ath12k_warn(ab,
  				    "failed to receive default regd during init\n");
@@ -5788,7 +4644,7 @@ index 412b98e5787..fee65f0680f 100644
  #if defined(__linux__)
  			regd = (struct ieee80211_regdomain *)&ath12k_world_regd;
  #elif defined(__FreeBSD__)
-@@ -439,6 +721,7 @@ ath12k_map_fw_dfs_region(enum ath12k_dfs_region dfs_region)
+@@ -439,6 +726,7 @@ ath12k_map_fw_dfs_region(enum ath12k_dfs_region dfs_region)
  	}
  }
  
@@ -5796,7 +4652,7 @@ index 412b98e5787..fee65f0680f 100644
  static u32 ath12k_get_bw_reg_flags(u16 max_bw)
  {
  	switch (max_bw) {
-@@ -461,6 +744,7 @@ static u32 ath12k_get_bw_reg_flags(u16 max_bw)
+@@ -461,6 +749,7 @@ static u32 ath12k_get_bw_reg_flags(u16 max_bw)
  		return 0;
  	}
  }
@@ -5804,7 +4660,7 @@ index 412b98e5787..fee65f0680f 100644
  
  static u32 ath12k_map_fw_reg_flags(u16 reg_flags)
  {
-@@ -503,6 +787,101 @@ static u32 ath12k_map_fw_phy_flags(u32 phy_flags)
+@@ -503,6 +792,104 @@ static u32 ath12k_map_fw_phy_flags(u32 phy_flags)
  	return flags;
  }
  
@@ -5832,12 +4688,15 @@ index 412b98e5787..fee65f0680f 100644
 +	if (in->psd_flag)
 +		flags |= NL80211_RRF_PSD;
 +	memset(out, 0, sizeof(*out));
-+	out->flags = flags | NL80211_RRF_NO_HT40 |
-+		NL80211_RRF_NO_80MHZ | NL80211_RRF_NO_160MHZ |
++	/*
++	 * Keep firmware HT40/80 MHz restrictions; LinuxKPI decides which
++	 * 5 GHz blocks may widen.  160/320 MHz, HE and EHT stay disabled.
++	 */
++	out->flags = flags | NL80211_RRF_NO_160MHZ |
 +		NL80211_RRF_NO_320MHZ | NL80211_RRF_NO_HE | NL80211_RRF_NO_EHT;
 +	out->freq_range.start_freq_khz = MHZ_TO_KHZ(in->start_freq);
 +	out->freq_range.end_freq_khz = MHZ_TO_KHZ(in->end_freq);
-+	out->freq_range.max_bandwidth_khz = MHZ_TO_KHZ(min_t(u32, 20,
++	out->freq_range.max_bandwidth_khz = MHZ_TO_KHZ(min_t(u32, 80,
 +							 min_t(u32, in->max_bw, max_bw)));
 +	out->power_rule.max_antenna_gain = DBI_TO_MBI(in->ant_gain);
 +	out->power_rule.max_eirp = DBM_TO_MBM(in->reg_power);
@@ -5906,7 +4765,7 @@ index 412b98e5787..fee65f0680f 100644
  static const char *
  ath12k_reg_get_regdom_str(enum nl80211_dfs_regions dfs_region)
  {
-@@ -636,6 +1015,7 @@ static void ath12k_reg_update_freq_range(struct ath12k_reg_freq *reg_freq,
+@@ -636,6 +1023,7 @@ static void ath12k_reg_update_freq_range(struct ath12k_reg_freq *reg_freq,
  	if (reg_freq->end_freq < reg_rule->end_freq)
  		reg_freq->end_freq = reg_rule->end_freq;
  }
@@ -5914,7 +4773,7 @@ index 412b98e5787..fee65f0680f 100644
  
  enum wmi_reg_6g_ap_type
  ath12k_reg_ap_pwr_convert(enum ieee80211_ap_reg_power power_type)
-@@ -658,6 +1038,9 @@ ath12k_reg_build_regd(struct ath12k_base *ab,
+@@ -658,6 +1046,9 @@ ath12k_reg_build_regd(struct ath12k_base *ab,
  		      enum wmi_vdev_type vdev_type,
  		      enum ieee80211_ap_reg_power power_type)
  {
@@ -5924,7 +4783,7 @@ index 412b98e5787..fee65f0680f 100644
  	struct ieee80211_regdomain *new_regd = NULL;
  	struct ath12k_reg_rule *reg_rule, *reg_rule_6ghz;
  	u32 flags, reg_6ghz_number, max_bw_6ghz;
-@@ -813,6 +1196,7 @@ ath12k_reg_build_regd(struct ath12k_base *ab,
+@@ -813,6 +1204,7 @@ ath12k_reg_build_regd(struct ath12k_base *ab,
  	new_regd->n_reg_rules = i;
  ret:
  	return new_regd;
@@ -5932,7 +4791,7 @@ index 412b98e5787..fee65f0680f 100644
  }
  
  void ath12k_regd_update_chan_list_work(struct work_struct *work)
-@@ -869,6 +1253,20 @@ void ath12k_regd_update_work(struct work_struct *work)
+@@ -869,6 +1261,20 @@ void ath12k_regd_update_work(struct work_struct *work)
  					 regd_update_work);
  	int ret;
  
@@ -5953,7 +4812,7 @@ index 412b98e5787..fee65f0680f 100644
  	ret = ath12k_regd_update(ar, false);
  	if (ret) {
  		/* Firmware has already moved to the new regd. We need
-@@ -900,6 +1298,35 @@ void ath12k_reg_reset_reg_info(struct ath12k_reg_info *reg_info)
+@@ -900,6 +1306,35 @@ void ath12k_reg_reset_reg_info(struct ath12k_reg_info *reg_info)
  	}
  }
  
@@ -5989,7 +4848,7 @@ index 412b98e5787..fee65f0680f 100644
  enum ath12k_reg_status ath12k_reg_validate_reg_info(struct ath12k_base *ab,
  						    struct ath12k_reg_info *reg_info)
  {
-@@ -922,9 +1349,32 @@ enum ath12k_reg_status ath12k_reg_validate_reg_info(struct ath12k_base *ab,
+@@ -922,9 +1357,32 @@ enum ath12k_reg_status ath12k_reg_validate_reg_info(struct ath12k_base *ab,
  		if (ab->hw_params->single_pdev_only &&
  		    pdev_idx < ab->hw_params->num_rxdma_per_pdev)
  			return ATH12K_REG_STATUS_DROP;
@@ -6022,7 +4881,7 @@ index 412b98e5787..fee65f0680f 100644
  
  	/* Avoid multiple overwrites to default regd, during core
  	 * stop-start after mac registration.
-@@ -946,6 +1396,14 @@ int ath12k_reg_handle_chan_list(struct ath12k_base *ab,
+@@ -946,6 +1404,14 @@ int ath12k_reg_handle_chan_list(struct ath12k_base *ab,
  	int pdev_idx = reg_info->phy_id;
  	struct ath12k *ar;
  
@@ -6037,7 +4896,7 @@ index 412b98e5787..fee65f0680f 100644
  	regd = ath12k_reg_build_regd(ab, reg_info, vdev_type, power_type);
  	if (!regd)
  		return -EINVAL;
-@@ -962,6 +1420,9 @@ int ath12k_reg_handle_chan_list(struct ath12k_base *ab,
+@@ -962,6 +1428,9 @@ int ath12k_reg_handle_chan_list(struct ath12k_base *ab,
  		ar = ab->pdevs[pdev_idx].ar;
  		kfree(ab->new_regd[pdev_idx]);
  		ab->new_regd[pdev_idx] = regd;
@@ -6047,7 +4906,7 @@ index 412b98e5787..fee65f0680f 100644
  		queue_work(ab->workqueue, &ar->regd_update_work);
  	} else {
  		/* Multiple events for the same *ar is not expected. But we
-@@ -981,6 +1442,9 @@ int ath12k_reg_handle_chan_list(struct ath12k_base *ab,
+@@ -981,6 +1450,9 @@ int ath12k_reg_handle_chan_list(struct ath12k_base *ab,
  
  void ath12k_reg_init(struct ieee80211_hw *hw)
  {
@@ -8184,18 +7043,6 @@ index 0bf0a7941cd..d603a22abda 100644
  #define ATH12K_OBSS_PD_THRESHOLD_IN_DBM		BIT(29)
  #define ATH12K_OBSS_PD_SRG_EN			BIT(30)
  #define ATH12K_OBSS_PD_NON_SRG_EN		BIT(31)
-diff --git a/sys/modules/ath12k/Makefile b/sys/modules/ath12k/Makefile
-index 067d1d2d200..3f3f67936ba 100644
---- a/sys/modules/ath12k/Makefile
-+++ b/sys/modules/ath12k/Makefile
-@@ -17,6 +17,7 @@ KMOD=	if_ath12k
- 
- SRCS+=	core.c hal.c
- SRCS+=	wmi.c mac.c reg.c htc.c qmi.c
-+SRCS+=	qmi_native.c qmi_native_codec.c
- SRCS+=	dp.c dp_tx.c dp_rx.c dp_mon.c debug.c
- SRCS+=	ce.c peer.c dbring.c fw.c p2p.c
- SRCS+=	dp_htt.c dp_peer.c
 -- 
 2.56.0
 

@@ -2,7 +2,14 @@
 
 Qualcomm WCN7850 (ath12k) Wi-Fi bring-up on native FreeBSD 15.1 through LinuxKPI.
 
-Status: station mode with WPA2-PSK works. Verified on hardware: unattended boot via rc.d, DHCP and ping on 5 GHz channel 44 and 2.4 GHz channel 1. The restructured series compiles to the same objects as the hardware-tested build, except that two log messages are demoted to debug output.
+Status: station mode with WPA2-PSK works on 2.4 GHz (20 MHz) and 5 GHz (HT40/VHT80). Verified on hardware: unattended boot via rc.d, DHCP and ping on 5 GHz channel 44 (VHT80) and 2.4 GHz channel 1. Results:
+
+- 30-minute soak: 1800/1800 pings, 0% loss.
+- 20/20 disconnect/reconnect cycles passed.
+- iperf3 download: about 280 Mb/s over TCP. UDP at 200 and 300 Mb/s: under 0.5% loss.
+- The in-kernel regulatory test and the regulatory model test pass.
+
+QMI is implemented in LinuxKPI (`linux_qmi*.c`), and ath12k uses the stock `qmi_handle_init` path. Strict regulatory enables 40/80 MHz on 5 GHz only within allowed 80 MHz blocks. NO_IR and DFS channels are passive. 160 MHz and 6 GHz are not enabled.
 
 ## Layout
 
@@ -17,7 +24,7 @@ The upstream series is split for review: one ath12k Makefile fix, the net80211 h
 
 - Changes to vendor code in `sys/contrib/dev/athk` are additive only: each one is wrapped in `#if defined(__FreeBSD__)` and keeps the original Linux code under `#else`.
 - Native code follows style(9).
-- On both bases, every commit builds GENERIC and the LinuxKPI/wlan/athk/iwlwifi/rtw/mt76 modules with no new warnings.
+- On both bases, every commit builds GENERIC and the LinuxKPI/wlan/athk/iwlwifi/rtw/mt76 modules with no new warnings. This was checked per commit after the latest fold.
 - `if_ath12k.ko` builds from 0006 on. The module is not in `sys/modules/Makefile`.
 - `ath11k` fails to build at both bases, before any patch is applied.
 
