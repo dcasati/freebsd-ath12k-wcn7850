@@ -26,7 +26,6 @@ QMI is implemented in LinuxKPI (`linux_qmi*.c`), and ath12k uses the stock `qmi_
 | `patches/linuxkpi-txq-leak/0001` | Separate LinuxKPI 802.11 fix, independent of ath12k: free the per-TID txqs in `lkpi_lsta_free()`. Applies unchanged to `stable/15`, `main`, or on top of either series |
 | `tools/ath12k_wlan.rc` | rc.d script that brings up `wlan0` at boot (also in `local/0014`) |
 | `tools/plot-results.pl` | Renders the CSV data under `results/` as SVG charts |
-| `tools/finalize-authorship.sh` | Rewrites a branch to a real author/committer identity and adds `Signed-off-by` (and optionally converts or drops the Copilot trailer) before submitting upstream |
 | `DEVELOPER-NOTES.md` | Detail for reviewers: hardware test results, patch split, design questions, known limitations |
 | `results/` | Hardware test results: numbers, charts, raw data |
 
