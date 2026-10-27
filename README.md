@@ -43,6 +43,11 @@ QMI and the MHI host are implemented in LinuxKPI, so ath12k keeps its
 stock `qmi_handle_init()` path. `if_ath12k.ko` is not yet hooked into
 `sys/modules/Makefile`.
 
+Patch 0008 adds an ath12k(4) manual page (loading, firmware, tunables,
+caveats) and lists the driver in linuxkpi_wlan(4). Like ath10k.4, it is
+not yet in `share/man/man4/Makefile`; read it from the source tree with
+`man -l share/man/man4/ath12k.4`.
+
 ## Quick start (stable/15)
 
 ```sh
