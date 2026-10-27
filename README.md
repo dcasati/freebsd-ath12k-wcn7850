@@ -119,4 +119,8 @@ line comparison against those sources (2026-10-27) found no shared lines
 beyond `#include` lines and Linux API calls; this rules out verbatim
 copying, not paraphrase.
 
-**AI assistance:** most of this code was written with an AI coding assistant (GitHub Copilot) under the author's direction, and is shared under the licenses above. The FreeBSD Project has not yet published a policy on AI-assisted contributions; this work will follow it once it exists.
+**AI assistance:** most of this code was written with an AI coding
+assistant (GitHub Copilot) under the author's direction, and is shared
+under the licenses above. The FreeBSD Project has not yet published a
+policy on AI-assisted contributions; this work will follow it once it
+exists.

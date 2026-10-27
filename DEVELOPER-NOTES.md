@@ -83,16 +83,20 @@ and I will send it on its own first.
 How the series is split
 -----------------------
 
-  01 LinuxKPI: 802.11: free per-TID txqs when freeing an lsta (1 file)
+  Separate: LinuxKPI: 802.11: free per-TID txqs when freeing an lsta
+     (patches/linuxkpi-txq-leak, +37/-1)
+
+  01 ath12k: fix wifi7/hal.c path in module Makefile (+1/-1)
   02 net80211: add optional controlled-port authorize hook (+12/-1)
   03 LinuxKPI: add primitives needed by ath12k (+431/-131)
   04 LinuxKPI: implement MHI host and QMI interfaces (+3436/-56)
   05 LinuxKPI: 802.11 station controlled port and strict regulatory
      (+1693/-145)
-  06 ath12k: add WCN7850 support on FreeBSD (+3687/-1, all vendor
+  06 ath12k: add WCN7850 support on FreeBSD (+3686, all vendor
      changes under #if defined(__FreeBSD__); includes the
      MODULE_VERSION/MODULE_DEPEND declarations)
   07 ath12k: keep 4-way peers unauthorized on rate-update peer_assoc
+     (+21)
   08 ath12k.4: add manual page (+158)
   09 LinuxKPI: add helpers needed by ath12k debugfs (+67/-3)
   10 ath12k: fix ATH12K_DEBUGFS build on FreeBSD (+5)
