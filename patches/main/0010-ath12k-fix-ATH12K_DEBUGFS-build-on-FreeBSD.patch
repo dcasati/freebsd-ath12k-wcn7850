@@ -1,4 +1,4 @@
-From 1c1b142a93efc5371cb32bb2e68e66563a17c293 Mon Sep 17 00:00:00 2001
+From f3d79936849e77b96934f1e1b4863df92afbf70d Mon Sep 17 00:00:00 2001
 From: Diego Casati <diego.casati@gmail.com>
 Date: Tue, 27 Oct 2026 12:25:48 -0600
 Subject: [PATCH 10/10] ath12k: fix ATH12K_DEBUGFS build on FreeBSD

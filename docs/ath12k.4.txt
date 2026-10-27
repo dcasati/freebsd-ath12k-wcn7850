@@ -25,6 +25,13 @@ DESCRIPTION
      ifconfig(8).  One can use fwget(8) to install the correct firmware
      package.
 
+     The package installs the firmware images as plain files under
+     /boot/firmware/ath12k/WCN7850/hw2.0/, which the driver reads through
+     firmware(9) when it attaches.  No firmware kernel module needs to be
+     loaded.  If a kernel module that registers the same images is loaded as
+     well, for example from kld_list, its registration fails with "already
+     registered" and error 6.
+
      The driver uses the linuxkpi_wlan(4) and linuxkpi(4) compat framework to
      bridge between the Linux and native FreeBSD driver code as well as to the
      native net80211(4) wireless stack.  The MHI bus and the QMI messaging
@@ -88,4 +95,4 @@ BUGS
 
      Host AP mode is not supported and monitor mode has not been tested.
 
-FreeBSD 15.1-STABLE            October 26, 2026                      ATH12K(4)
+FreeBSD 15.1-STABLE            October 27, 2026                      ATH12K(4)

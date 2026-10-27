@@ -1,4 +1,4 @@
-From 7658f5e29c026edeee942fec947e1ce33a1a9d6f Mon Sep 17 00:00:00 2001
+From e8ba95ca3bcab9e62c831ac35febbd14c0fe1767 Mon Sep 17 00:00:00 2001
 From: Diego Casati <diego.casati@gmail.com>
 Date: Mon, 26 Oct 2026 13:01:02 -0600
 Subject: [PATCH 08/10] ath12k.4: add manual page
@@ -15,23 +15,23 @@ module is not built from sys/modules/Makefile.
 
 Signed-off-by: Diego Casati <diego.casati@gmail.com>
 ---
- share/man/man4/ath12k.4        | 156 +++++++++++++++++++++++++++++++++
+ share/man/man4/ath12k.4        | 169 +++++++++++++++++++++++++++++++++
  share/man/man4/linuxkpi_wlan.4 |   2 +
- 2 files changed, 158 insertions(+)
+ 2 files changed, 171 insertions(+)
  create mode 100644 share/man/man4/ath12k.4
 
 diff --git a/share/man/man4/ath12k.4 b/share/man/man4/ath12k.4
 new file mode 100644
-index 00000000000..657c90f7524
+index 00000000000..20bacea65a4
 --- /dev/null
 +++ b/share/man/man4/ath12k.4
-@@ -0,0 +1,156 @@
+@@ -0,0 +1,169 @@
 +.\"
 +.\" Copyright (c) 2026 Diego Casati <diego.casati@gmail.com>
 +.\"
 +.\" SPDX-License-Identifier: BSD-2-Clause
 +.\"
-+.Dd October 26, 2026
++.Dd October 27, 2026
 +.Dt ATH12K 4
 +.Os
 +.Sh NAME
@@ -72,6 +72,19 @@ index 00000000000..657c90f7524
 +One can use
 +.Xr fwget 8
 +to install the correct firmware package.
++.Pp
++The package installs the firmware images as plain files under
++.Pa /boot/firmware/ath12k/WCN7850/hw2.0/ ,
++which the driver reads through
++.Xr firmware 9
++when it attaches.
++No firmware kernel module needs to be loaded.
++If a kernel module that registers the same images is loaded as well,
++for example from
++.Va kld_list ,
++its registration fails with
++.Dq already registered
++and error 6.
 +.Pp
 +The driver uses the
 +.Xr linuxkpi_wlan 4

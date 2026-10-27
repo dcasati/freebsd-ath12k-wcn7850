@@ -97,7 +97,7 @@ How the series is split
      MODULE_VERSION/MODULE_DEPEND declarations)
   07 ath12k: keep 4-way peers unauthorized on rate-update peer_assoc
      (+21)
-  08 ath12k.4: add manual page (+158)
+  08 ath12k.4: add manual page (+171)
   09 LinuxKPI: add helpers needed by ath12k debugfs (+67/-3)
   10 ath12k: fix ATH12K_DEBUGFS build on FreeBSD (+5)
   later, optional: tests/sys/compat/linuxkpi Kyua tests.

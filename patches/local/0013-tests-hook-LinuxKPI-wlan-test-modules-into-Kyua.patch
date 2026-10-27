@@ -1,4 +1,4 @@
-From bb9c185713b9da91fdf9c1f083a1b5ea2449d65d Mon Sep 17 00:00:00 2001
+From c05760f82c1c9e1da5cd95df2563c6826c5e3950 Mon Sep 17 00:00:00 2001
 From: Diego Casati <diego.casati@gmail.com>
 Date: Tue, 27 Oct 2026 12:32:39 -0600
 Subject: [PATCH 13/14] tests: hook LinuxKPI wlan test modules into Kyua

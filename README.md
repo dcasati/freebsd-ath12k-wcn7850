@@ -6,17 +6,112 @@ through LinuxKPI.
 
 **Status:** WPA2-PSK station mode works on 2.4 GHz (20 MHz) and 5 GHz
 (HT40/VHT80) on FreeBSD 15.1, with unattended bring-up at boot, DHCP
-and ping. Test results are in
-[results/2026-10-27](results/2026-10-27/README.md), including a boot
-[dmesg](results/2026-10-27/dmesg.boot). The hardware runs used the
-previous revision of the stable/15 series; the current one adds style,
-module-dependency and debugfs build fixes and has been build-tested.
+and ping. See the [test results](results/2026-10-27/README.md).
+
+The hardware runs used the previous revision of the stable/15 series.
+The current revision adds style, module-dependency, debugfs-build and
+manual page changes, and has been build-tested.
 
 ![Architecture overview](docs/figures/fig1-architecture.svg)
 
 More diagrams are in [docs/figures](docs/figures/).
 
-Attach at boot (from [dmesg.boot](results/2026-10-27/dmesg.boot)):
+## How this was made, and what is asked
+
+The author is a long-time FreeBSD user, not a kernel developer. Most of
+the code was written with an AI coding assistant (GitHub Copilot) under
+his direction; he ran all hardware tests. Treat this as a working proof
+of concept and a reference, not as commit-ready code. Feedback, review
+of the design questions in [DEVELOPER-NOTES.md](DEVELOPER-NOTES.md),
+and testing on other hardware are welcome.
+
+## What's here
+
+| Path | Contents |
+|------|----------|
+| `patches/stable-15/` | 0001-0010 against `stable/15` at `169e254b` (tested on hardware) |
+| `patches/main/` | The same 10 patches against `main` at `91bff7d7ed4` (build-tested only) |
+| `patches/local/` | 0011-0014, not for upstream: kernel configs, test harnesses, Kyua hookup, rc.d script |
+| `patches/linuxkpi-txq-leak/` | Independent LinuxKPI 802.11 fix: free per-TID txqs in `lkpi_lsta_free()` |
+| `docs/ath12k.4.txt` | The ath12k(4) manual page, rendered as text |
+| `docs/figures/` | Architecture and sequence diagrams |
+| `tools/` | `ath12k_wlan.rc` (rc.d script), `plot-results.pl` (CSV to SVG) |
+| `results/` | Hardware test results, charts, raw data and a boot dmesg |
+| `DEVELOPER-NOTES.md` | Test detail, patch split, design questions, known limitations |
+
+Changes to vendor code under `sys/contrib/dev/athk` are wrapped in
+`#if defined(__FreeBSD__)`, with the Linux code kept under `#else`.
+QMI and the MHI host are implemented in LinuxKPI, so ath12k keeps its
+stock `qmi_handle_init()` path. `if_ath12k.ko` is not yet hooked into
+`sys/modules/Makefile`.
+
+## Quick start (stable/15)
+
+```sh
+git clone https://github.com/freebsd/freebsd-src.git && cd freebsd-src
+git checkout -b ath12k-wcn7850 169e254b8440c010139b1351f46b70bc7ad3d5cb
+git am /path/to/freebsd-ath12k-wcn7850/patches/stable-15/*.patch
+git am /path/to/freebsd-ath12k-wcn7850/patches/local/*.patch   # optional
+
+make buildkernel KERNCONF=GENERIC
+make installkernel KERNCONF=GENERIC KODIR=/boot/kernel.ath12k
+```
+
+For `main`, check out `91bff7d7ed461360bc992dcd411703db6cd6d2a1` and
+apply `patches/main/*.patch` instead.
+
+The txq leak fix is recommended if you unload and reload the driver. It
+applies on its own to either base:
+
+```sh
+git am /path/to/freebsd-ath12k-wcn7850/patches/linuxkpi-txq-leak/*.patch
+```
+
+### Firmware
+
+Install the firmware package with `fwget` or
+`pkg install wifi-firmware-ath12k-kmod-wcn7850_hw20`. It installs plain
+image files under `/boot/firmware/ath12k/WCN7850/hw2.0/`, and the driver
+reads them through firmware(9) when it attaches. **No firmware kernel
+module needs to be loaded.** Do not add one to `kld_list`: devmatch(8)
+loads `if_ath12k` early, the images are already registered, and the
+module then fails with `already registered` / `error 6`.
+
+### Regulatory
+
+Set the country in loader.conf(5):
+
+```
+hw.ath12k.country="CA"   # ISO 3166 alpha-2
+```
+
+### Bring-up at boot
+
+Install `tools/ath12k_wlan.rc` as `/usr/local/etc/rc.d/ath12k_wlan` and
+set `ath12k_wlan_enable="YES"` in rc.conf(5). It creates `wlan0`, which
+`wlans_ath12k_wifi70` cannot do (see the manual page CAVEATS). With
+`ath12k_wlan_dhcp="YES"` (the default), dhclient(8) is started by a
+`wpa_cli -a` action script on association, so late associations still
+get a lease.
+
+Do not leave backup copies in `rc.d`: rc(8) runs every file there except
+`*.bak`, `*.orig`, `*.OLD`, `*~` and `*,v`.
+
+## Manual page
+
+Patch 0008 adds ath12k(4) and lists the driver in linuxkpi_wlan(4). It
+covers loading, firmware, the `hw.ath12k.country` tunable, caveats and
+current limits.
+
+- Read it without a source tree: [docs/ath12k.4.txt](docs/ath12k.4.txt)
+- From a patched source tree: `man -l share/man/man4/ath12k.4`
+
+Like ath10k.4, it is not yet listed in `share/man/man4/Makefile`, so
+`installworld` does not install it.
+
+## Boot messages
+
+Driver attach, from the full [dmesg.boot](results/2026-10-27/dmesg.boot):
 
 ```
 ath12k_wifi70: <ath12k_wifi7> mem 0xb0600000-0xb07fffff at device 0.0 on pci2
@@ -38,80 +133,10 @@ wlan0: link state changed to DOWN
 wlan0: link state changed to UP
 ```
 
-The `kldload: ... Unsupported file layout` lines are harmless (see Quick
-start). The `fw_build_id` message is missing its newline, so the next
-message is joined to it; this is a cosmetic bug.
-
-## How this was made, and what is asked
-
-The author is a long-time FreeBSD user, not a kernel developer. Most of
-the code was written with an AI coding assistant (GitHub Copilot) under
-his direction; he ran all hardware tests. Treat this as a working proof
-of concept and a reference, not as commit-ready code. Feedback, review
-of the design questions in [DEVELOPER-NOTES.md](DEVELOPER-NOTES.md),
-and testing on other hardware are welcome.
-
-## What's here
-
-| Path | Contents |
-|------|----------|
-| `patches/stable-15/` | 0001-0010 against `stable/15` at `169e254b` (tested on hardware) |
-| `patches/main/` | The same 10 patches against `main` at `91bff7d7ed4` (build-tested only) |
-| `patches/local/` | 0011-0014, not for upstream: kernel configs, test harnesses, Kyua hookup, rc.d script |
-| `patches/linuxkpi-txq-leak/` | Independent LinuxKPI 802.11 fix: free per-TID txqs in `lkpi_lsta_free()` |
-| `tools/` | `ath12k_wlan.rc` (rc.d script), `plot-results.pl` (CSV to SVG) |
-| `results/` | Hardware test results, charts and raw data |
-| `DEVELOPER-NOTES.md` | Test detail, patch split, design questions, known limitations |
-
-Changes to vendor code under `sys/contrib/dev/athk` are wrapped in
-`#if defined(__FreeBSD__)`, with the Linux code kept under `#else`.
-QMI and the MHI host are implemented in LinuxKPI, so ath12k keeps its
-stock `qmi_handle_init()` path. `if_ath12k.ko` is not yet hooked into
-`sys/modules/Makefile`.
-
-Patch 0008 adds an ath12k(4) manual page (loading, firmware, tunables,
-caveats) and lists the driver in linuxkpi_wlan(4). Like ath10k.4, it is
-not yet in `share/man/man4/Makefile`; a rendered copy is in
-[docs/ath12k.4.txt](docs/ath12k.4.txt). From the source tree, read it
-with `man -l share/man/man4/ath12k.4`.
-
-## Quick start (stable/15)
-
-```sh
-git clone https://github.com/freebsd/freebsd-src.git && cd freebsd-src
-git checkout -b ath12k-wcn7850 169e254b8440c010139b1351f46b70bc7ad3d5cb
-git am /path/to/freebsd-ath12k-wcn7850/patches/stable-15/*.patch
-git am /path/to/freebsd-ath12k-wcn7850/patches/local/*.patch   # optional
-
-make buildkernel KERNCONF=GENERIC
-make installkernel KERNCONF=GENERIC KODIR=/boot/kernel.ath12k
-```
-
-For `main`, check out `91bff7d7ed461360bc992dcd411703db6cd6d2a1` and
-apply `patches/main/*.patch` instead. The txq leak fix is recommended if
-you unload and reload the driver; it applies on its own to either base:
-`git am /path/to/freebsd-ath12k-wcn7850/patches/linuxkpi-txq-leak/*.patch`.
-
-**Firmware.** The driver reads the raw images from
-`/boot/firmware/ath12k/WCN7850/hw2.0/`. Do not also load the
-`ath12k_wcn7850_fw` KLD: devmatch(8) loads `if_ath12k` early, and the
-KLD then fails with `already registered` / `error 6`. The
-`kldload: ... Unsupported file layout` lines at attach are harmless;
-firmware(9) tries each image as a KLD before reading the raw file.
-
-**Regulatory.** Set the country in loader.conf(5):
-
-```
-hw.ath12k.country="CA"   # ISO 3166 alpha-2
-```
-
-**Boot.** Install `tools/ath12k_wlan.rc` as
-`/usr/local/etc/rc.d/ath12k_wlan` and set `ath12k_wlan_enable="YES"` in
-rc.conf(5). With `ath12k_wlan_dhcp="YES"` (the default), dhclient(8) is
-started by a `wpa_cli -a` action script on association, so late
-associations still get a lease. Do not leave backup copies in `rc.d`;
-rc(8) runs every file there except `*.bak`, `*.orig`, `*.OLD`, `*~` and
-`*,v`.
+- `kldload: ... Unsupported file layout` is harmless: firmware(9) tries
+  each image as a kernel module before reading it as a plain file.
+- The `fw_build_id` message is missing its newline, so the next message
+  is joined to it. This is a cosmetic bug.
 
 ## Known issues
 
