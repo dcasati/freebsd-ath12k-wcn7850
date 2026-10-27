@@ -2,12 +2,13 @@
 
 Qualcomm WCN7850 (ath12k) Wi-Fi bring-up on native FreeBSD 15.1 through LinuxKPI.
 
-Status: station mode with WPA2-PSK works on 2.4 GHz (20 MHz) and 5 GHz (HT40/VHT80). Verified on hardware: unattended boot via rc.d, DHCP and ping on 5 GHz channel 44 (VHT80) and 2.4 GHz channel 1. Results:
+Status: station mode with WPA2-PSK works on 2.4 GHz (20 MHz) and 5 GHz (HT40/VHT80). Verified on hardware: unattended boot via rc.d, DHCP and ping on 5 GHz and 2.4 GHz. Full results with charts and raw data: [results/2026-10-27](results/2026-10-27/README.md).
 
-- 30-minute soak: 1800/1800 pings, 0% loss.
-- 20/20 disconnect/reconnect cycles passed.
-- 10/10 driver unload/reload cycles passed, both with the service stopped first and hot while associated (no WMI timeouts).
-- iperf3 download: about 280 Mb/s over TCP. UDP at 200 and 300 Mb/s: under 0.5% loss.
+- Soaks: 30 min on 5 GHz with 1800/1800 pings, and 15 min each on 5 GHz and 2.4 GHz with 900/900 pings. 0% loss in every run.
+- Disconnect/reconnect: 20/20 cycles passed on 5 GHz (mean 3.65 s) and 20/20 on 2.4 GHz (3 s).
+- Driver unload/reload: 20/20 unloads clean, plus 10/10 hot unloads while associated. No WMI timeouts in either.
+- Kernel memory: with the separate LinuxKPI txq fix, `lkpi80211` no longer grows across unload/reload (it grew 16 KiB per cycle before).
+- iperf3 on 5 GHz VHT80: TCP 337 Mb/s down (370 Mb/s with 4 streams) and 338 Mb/s up; UDP 350 Mb/s down at 0% loss. These numbers are limited by the access point's CPU.
 - The in-kernel regulatory test and the regulatory model test pass.
 
 QMI is implemented in LinuxKPI (`linux_qmi*.c`), and ath12k uses the stock `qmi_handle_init` path. Strict regulatory enables 40/80 MHz on 5 GHz only within allowed 80 MHz blocks. NO_IR and DFS channels are passive. 160 MHz and 6 GHz are not enabled.
@@ -19,7 +20,10 @@ QMI is implemented in LinuxKPI (`linux_qmi*.c`), and ath12k uses the stock `qmi_
 | `patches/stable-15/0001-0008` | Upstream candidate series against freebsd-src `stable/15` at `169e254b` (hardware-validated base) |
 | `patches/main/0001-0008` | The same series rebased onto freebsd-src `main` at `91bff7d7ed4` (no conflicts) |
 | `patches/local/0009-0011` | Local only, not for upstream: ATH12KHOST/ATH12KLAB kernel configs, test harnesses, rc.d script. Apply on top of `stable-15` |
+| `patches/linuxkpi-txq-leak/0001` | Separate LinuxKPI 802.11 fix, independent of ath12k: free the per-TID txqs in `lkpi_lsta_free()`. Applies unchanged to `stable/15`, `main`, or on top of either series |
 | `tools/ath12k_wlan.rc` | rc.d script that brings up `wlan0` at boot (also in `local/0011`) |
+| `tools/plot-results.pl` | Renders the CSV data under `results/` as SVG charts |
+| `results/` | Hardware test results: numbers, charts, raw data |
 
 The upstream series is split for review: one ath12k Makefile fix, the net80211 hook, LinuxKPI primitives, LinuxKPI MHI/QMI, LinuxKPI 802.11, ath12k WCN7850 support, the ath12k 4-way handshake fix, and the ath12k(4) manual page.
 
@@ -42,6 +46,8 @@ make installkernel KERNCONF=GENERIC KODIR=/boot/kernel.ath12k
 ```
 
 For `main`, check out `91bff7d7ed461360bc992dcd411703db6cd6d2a1` and apply `patches/main/*.patch` instead.
+
+The LinuxKPI txq leak fix is separate and recommended, especially if you unload and reload the driver: `git am /path/to/freebsd-ath12k-wcn7850/patches/linuxkpi-txq-leak/*.patch`. It does not depend on the ath12k series.
 
 Firmware: the driver reads the raw images from `/boot/firmware/ath12k/WCN7850/hw2.0/`. Do not also `kldload` the firmware kld (`ath12k_wcn7850_fw`). `devmatch` loads `if_ath12k` early in boot, so the kld then fails with `firmware_register: ... already registered` / `MOD_LOAD ... error 6`. The `kldload: ... Unsupported file layout` lines at attach are harmless: firmware(9) probes each raw image as a kld before falling back to reading the file.
 

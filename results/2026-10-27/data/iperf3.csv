@@ -1,0 +1,10 @@
+band,test,direction,mbps
+5GHz-VHT80,TCP 1 stream,download,337
+5GHz-VHT80,TCP 4 streams,download,370
+5GHz-VHT80,TCP 1 stream,upload,338
+5GHz-VHT80,TCP 4 streams,upload,281
+5GHz-VHT80,UDP 400M,download,350
+2.4GHz-HT20,TCP 1 stream,download,31.5
+2.4GHz-HT20,TCP 4 streams,download,33.6
+2.4GHz-HT20,TCP 1 stream,upload,27.5
+2.4GHz-HT20,TCP 4 streams,upload,32.1

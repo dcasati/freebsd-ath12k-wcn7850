@@ -1,4 +1,4 @@
-From f23c4ecc6197e811768bb4dad6678b9dbb43e312 Mon Sep 17 00:00:00 2001
+From 39f4e65ce0aef3397900ac37970681d607f04965 Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 20:57:22 -0600
 Subject: [PATCH 11/11] tools: add rc.d script for ath12k wlan0 bring-up
@@ -6,22 +6,25 @@ Subject: [PATCH 11/11] tools: add rc.d script for ath12k wlan0 bring-up
 rc.conf's wlans_<parent> parser rejects ath12k_wifi70, so create
 wlan0 and run wpa_supplicant and dhclient from a dedicated rc script.
 Firmware kld collisions at load time are not treated as fatal.
+ath12k_wlan_args (default "scanvalid 10") is passed to ifconfig: with
+the net80211 default of 60 s, one missed scan after a disconnect
+stalls reconnection for about a minute.
 
 Local workaround only; the real fix belongs in the rc.d network
 scripts.
 
 Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
 ---
- tools/tools/ath12k/ath12k_wlan.rc | 99 +++++++++++++++++++++++++++++++
- 1 file changed, 99 insertions(+)
+ tools/tools/ath12k/ath12k_wlan.rc | 104 ++++++++++++++++++++++++++++++
+ 1 file changed, 104 insertions(+)
  create mode 100755 tools/tools/ath12k/ath12k_wlan.rc
 
 diff --git a/tools/tools/ath12k/ath12k_wlan.rc b/tools/tools/ath12k/ath12k_wlan.rc
 new file mode 100755
-index 00000000000..d03ee5e59aa
+index 00000000000..42441b09eea
 --- /dev/null
 +++ b/tools/tools/ath12k/ath12k_wlan.rc
-@@ -0,0 +1,99 @@
+@@ -0,0 +1,104 @@
 +#!/bin/sh
 +#
 +# PROVIDE: ath12k_wlan
@@ -38,6 +41,7 @@ index 00000000000..d03ee5e59aa
 +# ath12k_wlan_conf="/etc/wpa_supplicant-ath12k.conf"
 +# ath12k_wlan_kernel="/boot/kernel.ath12k-*/kernel"  (glob)
 +# ath12k_wlan_dhcp="YES"
++# ath12k_wlan_args="scanvalid 10"  (extra ifconfig args; see below)
 +
 +. /etc/rc.subr
 +
@@ -54,6 +58,10 @@ index 00000000000..d03ee5e59aa
 +: ${ath12k_wlan_conf:="/etc/wpa_supplicant-ath12k.conf"}
 +: ${ath12k_wlan_kernel:="/boot/kernel.ath12k-*/kernel"}
 +: ${ath12k_wlan_dhcp:="YES"}
++# net80211 answers scan requests from its cache for "scanvalid" seconds
++# (default 60); one missed scan after a disconnect then stalls reconnect
++# ~60s. 10 is the net80211 minimum.
++: ${ath12k_wlan_args:="scanvalid 10"}
 +
 +parent="ath12k_wifi70"
 +wpa_pid="/var/run/wpa_supplicant.${ath12k_wlan_if}.pid"
@@ -86,7 +94,7 @@ index 00000000000..d03ee5e59aa
 +	if ! ifconfig "${ath12k_wlan_if}" >/dev/null 2>&1; then
 +		ifconfig "${ath12k_wlan_if}" create wlandev "${parent}" || return 1
 +	fi
-+	ifconfig "${ath12k_wlan_if}" up
++	ifconfig "${ath12k_wlan_if}" ${ath12k_wlan_args} up
 +	if ! pgrep -F "${wpa_pid}" >/dev/null 2>&1; then
 +		/usr/sbin/wpa_supplicant -B -i "${ath12k_wlan_if}" \
 +		    -c "${ath12k_wlan_conf}" -P "${wpa_pid}" || return 1

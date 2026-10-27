@@ -1,0 +1,9 @@
+type,phase,allocs,bytes
+taskqueue,before-fix,60,6080
+lkpi80211,before-fix,1280,327680
+lkpikmalloc,before-fix,40,1600
+idr,before-fix,40,15360
+taskqueue,after-fix,60,6080
+lkpi80211,after-fix,0,0
+lkpikmalloc,after-fix,40,1600
+idr,after-fix,40,15360

@@ -14,6 +14,7 @@
 # ath12k_wlan_conf="/etc/wpa_supplicant-ath12k.conf"
 # ath12k_wlan_kernel="/boot/kernel.ath12k-*/kernel"  (glob)
 # ath12k_wlan_dhcp="YES"
+# ath12k_wlan_args="scanvalid 10"  (extra ifconfig args; see below)
 
 . /etc/rc.subr
 
@@ -30,6 +31,10 @@ load_rc_config $name
 : ${ath12k_wlan_conf:="/etc/wpa_supplicant-ath12k.conf"}
 : ${ath12k_wlan_kernel:="/boot/kernel.ath12k-*/kernel"}
 : ${ath12k_wlan_dhcp:="YES"}
+# net80211 answers scan requests from its cache for "scanvalid" seconds
+# (default 60); one missed scan after a disconnect then stalls reconnect
+# ~60s. 10 is the net80211 minimum.
+: ${ath12k_wlan_args:="scanvalid 10"}
 
 parent="ath12k_wifi70"
 wpa_pid="/var/run/wpa_supplicant.${ath12k_wlan_if}.pid"
@@ -62,7 +67,7 @@ ath12k_wlan_start()
 	if ! ifconfig "${ath12k_wlan_if}" >/dev/null 2>&1; then
 		ifconfig "${ath12k_wlan_if}" create wlandev "${parent}" || return 1
 	fi
-	ifconfig "${ath12k_wlan_if}" up
+	ifconfig "${ath12k_wlan_if}" ${ath12k_wlan_args} up
 	if ! pgrep -F "${wpa_pid}" >/dev/null 2>&1; then
 		/usr/sbin/wpa_supplicant -B -i "${ath12k_wlan_if}" \
 		    -c "${ath12k_wlan_conf}" -P "${wpa_pid}" || return 1
