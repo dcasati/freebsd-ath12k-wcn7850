@@ -1,0 +1,91 @@
+ATH12K(4)              FreeBSD Kernel Interfaces Manual              ATH12K(4)
+
+NAME
+     ath12k - Qualcomm IEEE 802.11be wireless network driver
+
+SYNOPSIS
+     The driver will auto-load without any user interaction using devmatch(8)
+     if enabled in rc.conf(5).
+
+     Only if auto-loading is explicitly disabled, place the following lines in
+     rc.conf(5) to manually load the driver as a module at boot time:
+
+           kld_list="${kld_list} if_ath12k"
+
+     It is discouraged to load the driver from loader(8).
+
+DESCRIPTION
+     The ath12k driver is derived from Qualcomm's Linux ath12k driver based on
+     Linux version 7.0.
+
+     This driver requires firmware to be loaded before it will work.  The
+     package wifi-firmware-ath12k-kmod from the
+     ports/net/wifi-firmware-ath12k-kmod port needs to be installed before the
+     driver is loaded.  Otherwise no wlan(4) interface can be created using
+     ifconfig(8).  One can use fwget(8) to install the correct firmware
+     package.
+
+     The driver uses the linuxkpi_wlan(4) and linuxkpi(4) compat framework to
+     bridge between the Linux and native FreeBSD driver code as well as to the
+     native net80211(4) wireless stack.  The MHI bus and the QMI messaging
+     support needed by ath12k are implemented in linuxkpi(4).
+
+     The device attaches as ath12k_wifi7N.  Only station mode is supported.  A
+     wlan(4) interface is created with:
+
+           ifconfig wlan0 create wlandev ath12k_wifi70
+
+     The driver applies strict regulatory rules.  Channels which the
+     regulatory domain marks as "no initiating radiation" or as requiring DFS
+     are scanned passively only.  The regulatory country cannot be changed at
+     runtime; see hw.ath12k.country below.
+
+HARDWARE
+     The ath12k driver supports PCIe devices with the following chipsets:
+
+           o   Qualcomm WCN7850 hw2.0
+
+     The driver also matches the Qualcomm QCN9274 and QCC2072 PCI IDs, but
+     only the WCN7850 has been tested on FreeBSD.
+
+LOADER TUNABLES
+     Tunables can be set in loader.conf(5) and are read when the module is
+     loaded.
+
+     hw.ath12k.country
+             ISO 3166-1 alpha-2 country code, in upper case, for example `CA'.
+             The driver requests this regulatory country from the firmware
+             before the boot-time regulatory domain is published.  If unset or
+             not two upper case letters, the regulatory domain reported by the
+             firmware is used.  The default is unset.
+
+     compat.linuxkpi.ath12k_core_debug_mask
+             Bitmask of driver debug messages to enable.  This is also a read-
+             write sysctl(8) variable.  The default is 0.
+
+     compat.linuxkpi.ath12k_core_ftm_mode
+             Boot the firmware in factory test mode.  This is not intended for
+             normal operation.  The default is 0.
+
+SEE ALSO
+     linuxkpi(4), linuxkpi_wlan(4), net80211(4), wlan(4), loader.conf(5),
+     rc.conf(5), networking(7), devmatch(8), fwget(8), ifconfig(8),
+     wpa_supplicant(8)
+
+HISTORY
+     The ath12k driver first appeared in FreeBSD 16.0.
+
+CAVEATS
+     The wlans_parent variable in rc.conf(5) does not accept parent device
+     names containing an underscore, so the wlan(4) interface for
+     ath12k_wifi70 has to be created explicitly with ifconfig(8).
+
+BUGS
+     While ath12k supports 802.11a/b/g/n/ac/ax/be modes, the compatibility
+     code currently only supports 802.11a/b/g/n/ac modes.  802.11ax/be, multi-
+     link operation (MLO), 160 MHz channels and the 6 GHz band are not
+     supported.
+
+     Host AP mode is not supported and monitor mode has not been tested.
+
+FreeBSD 15.1-STABLE            October 26, 2026                      ATH12K(4)

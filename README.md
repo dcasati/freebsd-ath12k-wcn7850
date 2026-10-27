@@ -16,6 +16,32 @@ module-dependency and debugfs build fixes and has been build-tested.
 
 More diagrams are in [docs/figures](docs/figures/).
 
+Attach at boot (from [dmesg.boot](results/2026-10-27/dmesg.boot)):
+
+```
+ath12k_wifi70: <ath12k_wifi7> mem 0xb0600000-0xb07fffff at device 0.0 on pci2
+ath12k_wifi70: Wi-Fi 7 Hardware name: wcn7850 hw2.0
+ath12k_wifi70: MSI vectors: 16
+kldload: /boot/firmware/ath12k/WCN7850/hw2.0/amss.bin: Unsupported file layout
+kldload: /boot/firmware/ath12k/WCN7850/hw2.0/amss.bin: Unsupported file layout
+ath12k_wifi70: successfully loaded firmware image 'ath12k/WCN7850/hw2.0/amss.bin'
+ath12k_wifi70: chip_id 0x2 chip_family 0x4 board_id 0xff soc_id 0x40170200
+ath12k_wifi70: fw_version 0x1103006c fw_build_timestamp 2026-03-06 09:10 fw_build_id QC_IMAGE_VERSION_STRING=WLAN.HMT.1.1.c7-00108-QCAHMTSWPL_V1.0_V2.0_SILICONZ_UPSTREAM-3ath12k_wifi70: successfully loaded firmware image 'ath12k/WCN7850/hw2.0/board-2.bin'
+ath12k_wifi70: successfully loaded firmware image 'ath12k/WCN7850/hw2.0/board-2.bin'
+ath12k_wifi70: successfully loaded firmware image 'ath12k/WCN7850/hw2.0/board-2.bin'
+kldload: /boot/firmware/ath12k/WCN7850/hw2.0/m3.bin: Unsupported file layout
+kldload: /boot/firmware/ath12k/WCN7850/hw2.0/m3.bin: Unsupported file layout
+ath12k_wifi70: successfully loaded firmware image 'ath12k/WCN7850/hw2.0/m3.bin'
+...
+wlan0: Ethernet address: xx:xx:xx:xx:xx:01
+wlan0: link state changed to DOWN
+wlan0: link state changed to UP
+```
+
+The `kldload: ... Unsupported file layout` lines are harmless (see Quick
+start). The `fw_build_id` message is missing its newline, so the next
+message is joined to it; this is a cosmetic bug.
+
 ## How this was made, and what is asked
 
 The author is a long-time FreeBSD user, not a kernel developer. Most of
@@ -45,8 +71,9 @@ stock `qmi_handle_init()` path. `if_ath12k.ko` is not yet hooked into
 
 Patch 0008 adds an ath12k(4) manual page (loading, firmware, tunables,
 caveats) and lists the driver in linuxkpi_wlan(4). Like ath10k.4, it is
-not yet in `share/man/man4/Makefile`; read it from the source tree with
-`man -l share/man/man4/ath12k.4`.
+not yet in `share/man/man4/Makefile`; a rendered copy is in
+[docs/ath12k.4.txt](docs/ath12k.4.txt). From the source tree, read it
+with `man -l share/man/man4/ath12k.4`.
 
 ## Quick start (stable/15)
 
