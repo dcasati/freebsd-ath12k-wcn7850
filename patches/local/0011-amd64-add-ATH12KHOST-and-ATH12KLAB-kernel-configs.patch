@@ -1,4 +1,4 @@
-From b40d42332de5326fb263dd1bb5f5f9c311c997b2 Mon Sep 17 00:00:00 2001
+From 25fe9cbf6d3e89b9be87c2465704070c3551a107 Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 14:44:31 -0600
 Subject: [PATCH 11/14] amd64: add ATH12KHOST and ATH12KLAB kernel configs

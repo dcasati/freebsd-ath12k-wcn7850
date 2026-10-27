@@ -1,4 +1,4 @@
-From 38ac2e39c1c735e97314994b65ba2c2431b01ccb Mon Sep 17 00:00:00 2001
+From b9a532e0d8409f5dcce1e25edb21bcfbe45ae0ea Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
 Date: Tue, 27 Oct 2026 12:05:23 -0600
 Subject: [PATCH] LinuxKPI: 802.11: free per-TID txqs when freeing an lsta
@@ -21,6 +21,8 @@ dereferenced slots left NULL (the MMPDU slot is optional).
 Tested on WCN7850 (if_ath12k): over 20 unload/reload cycles
 M_LKPI80211 went from +1280 allocations (+320 KiB) to no change.
 20 reconnect cycles and a 15-minute ping soak showed no growth.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
 ---
  sys/compat/linuxkpi/common/src/linux_80211.c | 38 +++++++++++++++++++-
  1 file changed, 37 insertions(+), 1 deletion(-)

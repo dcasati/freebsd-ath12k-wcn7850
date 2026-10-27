@@ -1,4 +1,4 @@
-From caebe5b65e371ec23ed766afa69ade49d3b9ac72 Mon Sep 17 00:00:00 2001
+From 94ca8da0d5a33ca6e976d05e3e1b6fe6b67ca1c9 Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 14:44:31 -0600
 Subject: [PATCH 06/10] ath12k: add WCN7850 support on FreeBSD
@@ -23,6 +23,9 @@ CONFIG_ATH12K_AHB apply only to FreeBSD.
   up to 80 MHz.  Skip the 6 GHz regd rebuild on authorize.
 - The requested boot country is logged at ATH12K_DBG_REG instead of
   info.
+- Declare MODULE_VERSION and MODULE_DEPEND on linuxkpi and
+  linuxkpi_wlan (and lindebugfs with ATH12K_DEBUGFS), so kldload
+  resolves them on kernels where they are modules.
 
 Tested on WCN7850 hw2.0 with WPA2-PSK on 2.4 GHz and 5 GHz (VHT80).
 

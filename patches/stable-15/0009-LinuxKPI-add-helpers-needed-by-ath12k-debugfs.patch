@@ -1,4 +1,4 @@
-From 3124b28fa8b326327a0930451f0af71385bf2f49 Mon Sep 17 00:00:00 2001
+From b6e32a5608c68f3a8d5b170995d742bcc1131127 Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
 Date: Tue, 27 Oct 2026 12:25:47 -0600
 Subject: [PATCH 09/10] LinuxKPI: add helpers needed by ath12k debugfs

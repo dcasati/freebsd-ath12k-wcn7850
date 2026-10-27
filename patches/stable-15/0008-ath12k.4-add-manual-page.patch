@@ -1,4 +1,4 @@
-From c21e416fec140e2fd5649f041c7d2d64d2a7dc31 Mon Sep 17 00:00:00 2001
+From c37d37cabae30727f529cdd0bb6ff77e5d33c50f Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
 Date: Mon, 26 Oct 2026 13:01:02 -0600
 Subject: [PATCH 08/10] ath12k.4: add manual page

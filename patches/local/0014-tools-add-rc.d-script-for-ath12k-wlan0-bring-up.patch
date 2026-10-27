@@ -1,4 +1,4 @@
-From 4ffdbf20e7fea1921377e943c2baa74cf45853a7 Mon Sep 17 00:00:00 2001
+From 1594c3c137137e6411ad1f32c2a93aa4cf3c96bc Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 20:57:22 -0600
 Subject: [PATCH 14/14] tools: add rc.d script for ath12k wlan0 bring-up
