@@ -27,6 +27,7 @@ QMI is implemented in LinuxKPI (`linux_qmi*.c`), and ath12k uses the stock `qmi_
 | `tools/ath12k_wlan.rc` | rc.d script that brings up `wlan0` at boot (also in `local/0014`) |
 | `tools/plot-results.pl` | Renders the CSV data under `results/` as SVG charts |
 | `tools/finalize-authorship.sh` | Rewrites a branch to a real author/committer identity and adds `Signed-off-by` (and optionally converts or drops the Copilot trailer) before submitting upstream |
+| `DEVELOPER-NOTES.md` | Detail for reviewers: hardware test results, patch split, design questions, known limitations |
 | `results/` | Hardware test results: numbers, charts, raw data |
 
 The upstream series is split for review: one ath12k Makefile fix, the net80211 hook, LinuxKPI primitives, LinuxKPI MHI/QMI, LinuxKPI 802.11, ath12k WCN7850 support, the ath12k 4-way handshake fix, the ath12k(4) manual page, the LinuxKPI helpers for ath12k debugfs, and the ath12k debugfs build fix.
