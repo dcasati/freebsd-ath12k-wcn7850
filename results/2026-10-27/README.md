@@ -28,6 +28,10 @@ These are hardware results for the series in `patches/`, plus the separate Linux
 | iperf3, 2.4 GHz HT20 | 28-34 Mb/s each way |
 | Build, LinuxKPI txq fix alone | GENERIC + linuxkpi, linuxkpi_wlan, wlan, ath10k, iwlwifi, rtw88, rtw89, mt76: no errors, no warnings on `stable/15` 169e254b and `main` 91bff7d7 |
 
+## Boot messages
+
+[`dmesg.boot`](dmesg.boot) is `/var/run/dmesg.boot` from the `kernel.ath12k-txqleak` kernel (`ATH12KHOST` config, which enables WITNESS). MAC addresses, the build host and the NVMe serial number are redacted; nothing else is changed. The `kldload: ... Unsupported file layout` lines are firmware(9) probing each raw image as a KLD before reading it as a file, and are harmless. The `fw_build_id` line has no trailing newline in the driver output, so the next message starts on the same line.
+
 ## Kernel memory over driver unload/reload
 
 ![malloc growth](unload-allocator-delta.svg)
