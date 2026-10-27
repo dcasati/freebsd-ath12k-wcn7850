@@ -67,4 +67,18 @@ hw.ath12k.country="CA"   # ISO 3166 alpha-2 regulatory country
 
 ## License
 
-BSD-2-Clause, see [LICENSE](LICENSE). Modified upstream files keep their original licenses: ath12k is BSD-3-Clause-Clear, LinuxKPI is BSD-2-Clause.
+The contents of this repository (patches, tools, results) are offered under BSD-2-Clause, see [LICENSE](LICENSE). Every file touched by the patches keeps the license in its SPDX header:
+
+| Area | License | Notes |
+|---|---|---|
+| `sys/contrib/dev/athk/ath12k` (and the small ath10k/ath11k adaptations) | BSD-3-Clause-Clear | Qualcomm/Linux Foundation vendor driver; changes are under `#if defined(__FreeBSD__)`. New file `dp_cc.h` uses the same license. |
+| `sys/compat/linuxkpi` (incl. new `linux_mhi.c` code, `linux_qmi*.c/h`, `linux_80211_sta.h`) | BSD-2-Clause | New files carry `Copyright (c) 2026 Diego Casati`. |
+| `sys/net80211` | BSD-2-Clause | +12/-1. |
+| `share/man/man4/ath12k.4`, `tests/`, `tools/` | BSD-2-Clause | |
+| `sys/tests/linuxkpi_wlan` (local only) | BSD-2-Clause, or BSD-3-Clause-Clear where a test reuses ath12k tables | |
+
+No GPL code was intentionally used. The Linux MHI host and QMI code (`drivers/bus/mhi`, `drivers/soc/qcom/qmi_*.c`) is GPL-2.0, so the LinuxKPI MHI/QMI implementations here were written against the Linux *header* interfaces (`linux/mhi.h`, `linux/soc/qcom/qmi.h`) rather than ported. OpenBSD qwz(4) (ISC) was consulted as a behavioural reference for the WCN7850 MHI boot sequence, not copied.
+
+A whitespace-normalised line comparison (2026-10-27) of the new MHI/QMI code (~1300 non-trivial lines) against Linux master `drivers/bus/mhi/host/{boot,init,main,pm}.c`, `internal.h`, `drivers/bus/mhi/common.h`, `drivers/soc/qcom/qmi_{encdec,interface}.c` and OpenBSD `sys/dev/pci/if_qwz_pci.c` found no shared lines other than `#include` lines and Linux API calls (for example `release_firmware(firmware);`). That check rules out verbatim copying, not paraphrase.
+
+**AI-generated code:** most of this code was written by an AI coding assistant (GitHub Copilot) under the author's direction. Whether AI output can be copyrighted, and how its training data affects provenance, is legally unsettled, and the FreeBSD Project has not yet published a policy. The author offers his contribution under the licenses above to the extent he holds any rights in it, but cannot give a stronger guarantee of provenance than the check described above.
