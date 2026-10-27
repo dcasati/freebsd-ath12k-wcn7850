@@ -1,7 +1,7 @@
-From b519b3a853b07f522dbdf959e7cc496668a47390 Mon Sep 17 00:00:00 2001
+From 5d6e3718ccbd02d3ee7b49098be5bc4bacc10765 Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 14:44:30 -0600
-Subject: [PATCH 5/8] LinuxKPI: 802.11 station controlled port and strict
+Subject: [PATCH 05/10] LinuxKPI: 802.11 station controlled port and strict
  regulatory
 
 - Gate the WPA2 controlled port on a TX-acked EAPOL M4, installed
@@ -29,13 +29,13 @@ Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
  .../linuxkpi/common/include/linux/ieee80211.h |   23 +-
  .../linuxkpi/common/include/net/cfg80211.h    |  286 ++--
  .../common/include/net/ieee80211_radiotap.h   |   44 +
- .../linuxkpi/common/include/net/mac80211.h    |   82 +-
+ .../linuxkpi/common/include/net/mac80211.h    |   90 +-
  sys/compat/linuxkpi/common/src/linux_80211.c  | 1174 ++++++++++++++++-
  sys/compat/linuxkpi/common/src/linux_80211.h  |   23 +
  .../linuxkpi/common/src/linux_80211_sta.h     |  172 +++
- sys/contrib/dev/athk/ath10k/mac.c             |    7 +-
- sys/contrib/dev/athk/ath11k/mac.c             |    7 +-
- 9 files changed, 1671 insertions(+), 147 deletions(-)
+ sys/contrib/dev/athk/ath10k/mac.c             |   13 +
+ sys/contrib/dev/athk/ath11k/mac.c             |   13 +
+ 9 files changed, 1693 insertions(+), 145 deletions(-)
  create mode 100644 sys/compat/linuxkpi/common/src/linux_80211_sta.h
 
 diff --git a/sys/compat/linuxkpi/common/include/linux/ieee80211.h b/sys/compat/linuxkpi/common/include/linux/ieee80211.h
@@ -606,10 +606,10 @@ index 82e554f6b96..53a814e1584 100644
   * This structure deviates from
   * 'https://www.radiotap.org/fields/Vendor%20Namespace.html'
 diff --git a/sys/compat/linuxkpi/common/include/net/mac80211.h b/sys/compat/linuxkpi/common/include/net/mac80211.h
-index 83521c2faba..1dec2e6ca75 100644
+index 83521c2faba..847fd5116f6 100644
 --- a/sys/compat/linuxkpi/common/include/net/mac80211.h
 +++ b/sys/compat/linuxkpi/common/include/net/mac80211.h
-@@ -261,13 +261,16 @@ struct ieee80211_chanreq {
+@@ -261,15 +261,18 @@ struct ieee80211_chanreq {
   * 802.11ac-2013, 8.4.2.164 VHT Transmit Power Envelope element
   * 802.11-???? ?
   */
@@ -618,16 +618,22 @@ index 83521c2faba..1dec2e6ca75 100644
 +
  struct ieee80211_parsed_tpe_eirp {
 -	int8_t					power[5];
-+	int8_t					power[IEEE80211_TPE_EIRP_ENTRIES_320MHZ];
- 	uint8_t					count;
- 	bool					valid;
+-	uint8_t					count;
+-	bool					valid;
++	int8_t			power[IEEE80211_TPE_EIRP_ENTRIES_320MHZ];
++	uint8_t			count;
++	bool			valid;
  };
  struct ieee80211_parsed_tpe_psd {
 -	int8_t					power[16];
-+	int8_t					power[IEEE80211_TPE_PSD_ENTRIES_320MHZ];
- 	uint8_t					count;
- 	bool					valid;
+-	uint8_t					count;
+-	bool					valid;
++	int8_t			power[IEEE80211_TPE_PSD_ENTRIES_320MHZ];
++	uint8_t			count;
++	bool			valid;
  };
+ struct ieee80211_parsed_tpe {
+ 	/* We see access to [0] so assume at least 2. */
 @@ -356,6 +359,11 @@ struct ieee80211_bss_conf {
  	int		twt_requester, uora_exists, uora_ocw_range;
  	int		assoc_capability, enable_beacon, hidden_ssid, ibss_joined, twt_protected;
@@ -773,7 +779,7 @@ index 83521c2faba..1dec2e6ca75 100644
  
  /* -------------------------------------------------------------------------- */
 diff --git a/sys/compat/linuxkpi/common/src/linux_80211.c b/sys/compat/linuxkpi/common/src/linux_80211.c
-index cde4b820b4d..a5fd2841790 100644
+index cde4b820b4d..4e802d66047 100644
 --- a/sys/compat/linuxkpi/common/src/linux_80211.c
 +++ b/sys/compat/linuxkpi/common/src/linux_80211.c
 @@ -68,6 +68,7 @@
@@ -1812,7 +1818,7 @@ index cde4b820b4d..a5fd2841790 100644
  				lkpi_nl80211_band_to_net80211_band(channels[i].band)),
  			    channels[i].center_freq, channels[i].max_power,
  			    nflags, bands, cflags);
-+			/* net80211 adds both HT40 directions unconditionally. */
++			/* net80211 always adds both HT40 directions. */
 +			for (k = m = first; k < *n; k++) {
 +				if (hw->wiphy->lkpi_regulatory_strict &&
 +				    ((IEEE80211_IS_CHAN_HT40U(&c[k]) &&
@@ -2741,59 +2747,75 @@ index 00000000000..d32f9968f9f
 +
 +#endif
 diff --git a/sys/contrib/dev/athk/ath10k/mac.c b/sys/contrib/dev/athk/ath10k/mac.c
-index 51ba60b9c23..4ba9e128bbb 100644
+index 51ba60b9c23..4615915697b 100644
 --- a/sys/contrib/dev/athk/ath10k/mac.c
 +++ b/sys/contrib/dev/athk/ath10k/mac.c
-@@ -1620,18 +1620,19 @@ static int ath10k_mac_remove_vendor_ie(struct sk_buff *skb, unsigned int oui,
+@@ -1620,17 +1620,30 @@ static int ath10k_mac_remove_vendor_ie(struct sk_buff *skb, unsigned int oui,
  {
  	size_t len;
  	const u8 *next;
--	const u8 *end;
++#if defined(__FreeBSD__)
 +	const u8 *end, *found;
++#else
+ 	const u8 *end;
++#endif
  	u8 *ie;
  
  	if (WARN_ON(skb->len < ie_offset))
  		return -EINVAL;
  
--	ie = (u8 *)cfg80211_find_vendor_ie(oui, oui_type,
++#if defined(__FreeBSD__)
 +	found = cfg80211_find_vendor_ie(oui, oui_type,
++					   skb->data + ie_offset,
++					   skb->len - ie_offset);
++	if (!found)
++		return -ENOENT;
++	ie = skb->data + (found - skb->data);
++#else
+ 	ie = (u8 *)cfg80211_find_vendor_ie(oui, oui_type,
  					   skb->data + ie_offset,
  					   skb->len - ie_offset);
--	if (!ie)
-+	if (!found)
+ 	if (!ie)
  		return -ENOENT;
++#endif
  
-+	ie = skb->data + (found - skb->data);
  	len = ie[1] + 2;
  	end = skb->data + skb->len;
- 	next = ie + len;
 diff --git a/sys/contrib/dev/athk/ath11k/mac.c b/sys/contrib/dev/athk/ath11k/mac.c
-index e4ee2ba1f66..9c7e4545b7a 100644
+index e4ee2ba1f66..c7e34fa0a50 100644
 --- a/sys/contrib/dev/athk/ath11k/mac.c
 +++ b/sys/contrib/dev/athk/ath11k/mac.c
-@@ -1453,18 +1453,19 @@ static int ath11k_mac_remove_vendor_ie(struct sk_buff *skb, unsigned int oui,
+@@ -1453,17 +1453,30 @@ static int ath11k_mac_remove_vendor_ie(struct sk_buff *skb, unsigned int oui,
  				       u8 oui_type, size_t ie_offset)
  {
  	size_t len;
--	const u8 *next, *end;
++#if defined(__FreeBSD__)
 +	const u8 *next, *end, *found;
++#else
+ 	const u8 *next, *end;
++#endif
  	u8 *ie;
  
  	if (WARN_ON(skb->len < ie_offset))
  		return -EINVAL;
  
--	ie = (u8 *)cfg80211_find_vendor_ie(oui, oui_type,
++#if defined(__FreeBSD__)
 +	found = cfg80211_find_vendor_ie(oui, oui_type,
++					   skb->data + ie_offset,
++					   skb->len - ie_offset);
++	if (!found)
++		return -ENOENT;
++	ie = skb->data + (found - skb->data);
++#else
+ 	ie = (u8 *)cfg80211_find_vendor_ie(oui, oui_type,
  					   skb->data + ie_offset,
  					   skb->len - ie_offset);
--	if (!ie)
-+	if (!found)
+ 	if (!ie)
  		return -ENOENT;
++#endif
  
-+	ie = skb->data + (found - skb->data);
  	len = ie[1] + 2;
  	end = skb->data + skb->len;
- 	next = ie + len;
 -- 
 2.56.0
 

@@ -1,6 +1,6 @@
-From 94738614d288cfd76c0bb4c2a09313555f49f720 Mon Sep 17 00:00:00 2001
+From 38ac2e39c1c735e97314994b65ba2c2431b01ccb Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
-Date: Tue, 27 Oct 2026 12:05:18 -0600
+Date: Tue, 27 Oct 2026 12:05:23 -0600
 Subject: [PATCH] LinuxKPI: 802.11: free per-TID txqs when freeing an lsta
 
 lkpi_lsta_alloc() allocates one struct lkpi_txq for each sta->txq[]
@@ -26,7 +26,7 @@ M_LKPI80211 went from +1280 allocations (+320 KiB) to no change.
  1 file changed, 37 insertions(+), 1 deletion(-)
 
 diff --git a/sys/compat/linuxkpi/common/src/linux_80211.c b/sys/compat/linuxkpi/common/src/linux_80211.c
-index 562940e35eb..8e1fd065c15 100644
+index cde4b820b4d..ff2f6336100 100644
 --- a/sys/compat/linuxkpi/common/src/linux_80211.c
 +++ b/sys/compat/linuxkpi/common/src/linux_80211.c
 @@ -1151,9 +1151,11 @@ lkpi_lsta_alloc(struct ieee80211vap *vap, const uint8_t mac[IEEE80211_ADDR_LEN],
@@ -57,7 +57,7 @@ index 562940e35eb..8e1fd065c15 100644
  	    __func__, lsta, mbufq_len(&lsta->txq)));
  	LKPI_80211_LSTA_TXQ_LOCK_DESTROY(lsta);
  
-+	/* Unschedule, purge and free the per-TID txqs from lkpi_lsta_alloc(). */
++	/* Unschedule, purge and free the txqs from lkpi_lsta_alloc(). */
 +	lhw = HW_TO_LHW(lsta->hw);
 +	sta = LSTA_TO_STA(lsta);
 +	for (tid = 0; tid < nitems(sta->txq); tid++) {

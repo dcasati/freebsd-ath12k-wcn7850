@@ -1,7 +1,7 @@
-From 7a8cd235dd4f197ea3e9cc779ba5070310ffcc2a Mon Sep 17 00:00:00 2001
+From 01a6727f8a6b0a1fd0cea6d6a8fcdab6223511b6 Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 14:44:30 -0600
-Subject: [PATCH 4/8] LinuxKPI: implement MHI host and QMI interfaces
+Subject: [PATCH 04/10] LinuxKPI: implement MHI host and QMI interfaces
 
 Add an MHI host implementation (BHI/BHIe firmware download, channel and
 event rings, M-state handling).  The firmware boot sequence follows
@@ -20,12 +20,12 @@ Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
  .../common/include/linux/soc/qcom/qmi.h       |   84 +-
  sys/compat/linuxkpi/common/src/linux_mhi.c    | 1709 ++++++++++++++++-
  sys/compat/linuxkpi/common/src/linux_mhi.h    |  180 ++
- sys/compat/linuxkpi/common/src/linux_qmi.c    |  906 +++++++++
+ sys/compat/linuxkpi/common/src/linux_qmi.c    |  907 +++++++++
  sys/compat/linuxkpi/common/src/linux_qmi.h    |   67 +
- .../linuxkpi/common/src/linux_qmi_codec.c     |  436 +++++
+ .../linuxkpi/common/src/linux_qmi_codec.c     |  475 +++++
  sys/conf/files                                |    4 +
  sys/modules/linuxkpi_wlan/Makefile            |    3 +-
- 9 files changed, 3396 insertions(+), 56 deletions(-)
+ 9 files changed, 3436 insertions(+), 56 deletions(-)
  create mode 100644 sys/compat/linuxkpi/common/src/linux_mhi.h
  create mode 100644 sys/compat/linuxkpi/common/src/linux_qmi.c
  create mode 100644 sys/compat/linuxkpi/common/src/linux_qmi.h
@@ -177,7 +177,7 @@ index 24b3205d6f5..ce980d6a22d 100644
  
  #endif	/* _LINUXKPI_LINUX_MHI_H */
 diff --git a/sys/compat/linuxkpi/common/include/linux/soc/qcom/qmi.h b/sys/compat/linuxkpi/common/include/linux/soc/qcom/qmi.h
-index 647eaf271d8..130edab916d 100644
+index 647eaf271d8..ef4eea4e019 100644
 --- a/sys/compat/linuxkpi/common/include/linux/soc/qcom/qmi.h
 +++ b/sys/compat/linuxkpi/common/include/linux/soc/qcom/qmi.h
 @@ -30,6 +30,7 @@
@@ -219,7 +219,7 @@ index 647eaf271d8..130edab916d 100644
  
  	const struct qmi_msg_handler	*handler;
  	struct qmi_ops			ops;
-+	void				*lkpi;		/* LinuxKPI QRTR client */
++	void				*lkpi;	/* LinuxKPI QRTR client */
  };
  
 -
@@ -2271,10 +2271,10 @@ index 00000000000..16771f11a7e
 +#endif
 diff --git a/sys/compat/linuxkpi/common/src/linux_qmi.c b/sys/compat/linuxkpi/common/src/linux_qmi.c
 new file mode 100644
-index 00000000000..2ea3abd274c
+index 00000000000..a222eec3234
 --- /dev/null
 +++ b/sys/compat/linuxkpi/common/src/linux_qmi.c
-@@ -0,0 +1,906 @@
+@@ -0,0 +1,907 @@
 +/*-
 + * SPDX-License-Identifier: BSD-2-Clause
 + *
@@ -2359,7 +2359,7 @@ index 00000000000..2ea3abd274c
 +	TAILQ_ENTRY(lkpi_qrtr_ep) link;
 +	struct mhi_controller	*ctrl;
 +	struct task		task;
-+	struct mtx		rx_lock;	/* Receive queue and rx_error. */
++	struct mtx		rx_lock;	/* Receive queue, rx_error. */
 +	struct lkpi_qrtr_packet	queue[QRTR_QUEUE_LEN];
 +	unsigned int		read, write, queued;
 +	int			rx_error;
@@ -2419,7 +2419,8 @@ index 00000000000..2ea3abd274c
 +	if (txn->active) {
 +		txn->active = false;
 +		txn->handle = NULL;
-+		KASSERT(lq->users != 0, ("QMI transaction reference underflow"));
++		KASSERT(lq->users != 0,
++		    ("QMI transaction reference underflow"));
 +		lq->users--;
 +		wakeup(&lq->users);
 +	}
@@ -3256,10 +3257,10 @@ index 00000000000..df835577473
 +#endif /* _LINUXKPI_QMI_INTERNAL_H_ */
 diff --git a/sys/compat/linuxkpi/common/src/linux_qmi_codec.c b/sys/compat/linuxkpi/common/src/linux_qmi_codec.c
 new file mode 100644
-index 00000000000..9acdd9ca3ed
+index 00000000000..75758420f6f
 --- /dev/null
 +++ b/sys/compat/linuxkpi/common/src/linux_qmi_codec.c
-@@ -0,0 +1,436 @@
+@@ -0,0 +1,475 @@
 +/*-
 + * SPDX-License-Identifier: BSD-2-Clause
 + *
@@ -3334,7 +3335,8 @@ index 00000000000..9acdd9ca3ed
 +	case QMI_UNSIGNED_4_BYTE:
 +	case QMI_SIGNED_4_BYTE_ENUM: return (4);
 +	case QMI_UNSIGNED_8_BYTE: return (8);
-+	default: return (0);
++	default:
++		return (0);
 +	}
 +}
 +
@@ -3342,10 +3344,14 @@ index 00000000000..9acdd9ca3ed
 +qmi_get(const void *p, unsigned int width)
 +{
 +	switch (width) {
-+	case 1: return (*(const uint8_t *)p);
-+	case 2: return (le16dec(p));
-+	case 4: return (le32dec(p));
-+	default: return (le64dec(p));
++	case 1:
++		return (*(const uint8_t *)p);
++	case 2:
++		return (le16dec(p));
++	case 4:
++		return (le32dec(p));
++	default:
++		return (le64dec(p));
 +	}
 +}
 +
@@ -3353,10 +3359,18 @@ index 00000000000..9acdd9ca3ed
 +qmi_put(void *p, uint64_t value, unsigned int width)
 +{
 +	switch (width) {
-+	case 1: *(uint8_t *)p = value; break;
-+	case 2: le16enc(p, value); break;
-+	case 4: le32enc(p, value); break;
-+	default: le64enc(p, value); break;
++	case 1:
++		*(uint8_t *)p = value;
++		break;
++	case 2:
++		le16enc(p, value);
++		break;
++	case 4:
++		le32enc(p, value);
++		break;
++	default:
++		le64enc(p, value);
++		break;
 +	}
 +}
 +
@@ -3369,10 +3383,18 @@ index 00000000000..9acdd9ca3ed
 +	uint64_t d;
 +
 +	switch (width) {
-+	case 1: memcpy(&a, p, 1); return (a);
-+	case 2: memcpy(&b, p, 2); return (b);
-+	case 4: memcpy(&c, p, 4); return (c);
-+	default: memcpy(&d, p, 8); return (d);
++	case 1:
++		memcpy(&a, p, 1);
++		return (a);
++	case 2:
++		memcpy(&b, p, 2);
++		return (b);
++	case 4:
++		memcpy(&c, p, 4);
++		return (c);
++	default:
++		memcpy(&d, p, 8);
++		return (d);
 +	}
 +}
 +
@@ -3384,10 +3406,18 @@ index 00000000000..9acdd9ca3ed
 +	uint32_t c = value;
 +
 +	switch (width) {
-+	case 1: memcpy(p, &a, 1); break;
-+	case 2: memcpy(p, &b, 2); break;
-+	case 4: memcpy(p, &c, 4); break;
-+	default: memcpy(p, &value, 8); break;
++	case 1:
++		memcpy(p, &a, 1);
++		break;
++	case 2:
++		memcpy(p, &b, 2);
++		break;
++	case 4:
++		memcpy(p, &c, 4);
++		break;
++	default:
++		memcpy(p, &value, 8);
++		break;
 +	}
 +}
 +
@@ -3429,18 +3459,22 @@ index 00000000000..9acdd9ca3ed
 +		}
 +		if (e->data_type == QMI_DATA_LEN) {
 +			width = e->elem_size;
-+			if ((width != 1 && width != 2) || capacity - pos < width)
++			if ((width != 1 && width != 2) ||
++			    capacity - pos < width)
 +				return (EMSGSIZE);
 +			if (decode)
 +				variable = qmi_get(wire + pos, width);
 +			else {
-+				memcpy(&variable, host + e->offset, sizeof(variable));
-+				if (variable > (width == 1 ? UINT8_MAX : UINT16_MAX))
++				memcpy(&variable, host + e->offset,
++				    sizeof(variable));
++				if (variable >
++				    (width == 1 ? UINT8_MAX : UINT16_MAX))
 +					return (ERANGE);
 +				qmi_put(wire + pos, variable, width);
 +			}
 +			if (decode && !validate)
-+				memcpy(host + e->offset, &variable, sizeof(variable));
++				memcpy(host + e->offset, &variable,
++				    sizeof(variable));
 +			have_variable = true;
 +			pos += width;
 +			continue;
@@ -3452,9 +3486,11 @@ index 00000000000..9acdd9ca3ed
 +			if (capacity - pos < width)
 +				return (EMSGSIZE);
 +			if (decode)
-+				n = nested ? qmi_get(wire + pos, width) : capacity - pos;
++				n = nested ? qmi_get(wire + pos, width) :
++				    capacity - pos;
 +			else {
-+				n = strnlen((char *)host + e->offset, e->elem_len);
++				n = strnlen((char *)host + e->offset,
++				    e->elem_len);
 +				if (nested)
 +					qmi_put(wire + pos, n, width);
 +			}
@@ -3477,9 +3513,10 @@ index 00000000000..9acdd9ca3ed
 +				return (EINVAL);
 +			for (j = 0; j < n; j++) {
 +				error = qmi_fields(e->ei_array, QMI_SCHEMA_MAX,
-+				    validate ? NULL : host + e->offset + j * e->elem_size,
-+				    e->elem_size, wire + pos, capacity - pos, &sub,
-+				    decode, validate, depth + 1, true);
++				    validate ? NULL :
++				    host + e->offset + j * e->elem_size,
++				    e->elem_size, wire + pos, capacity - pos,
++				    &sub, decode, validate, depth + 1, true);
 +				if (error != 0)
 +					return (error);
 +				pos += sub;
@@ -3495,13 +3532,15 @@ index 00000000000..9acdd9ca3ed
 +		if (!validate) {
 +			for (j = 0; j < n; j++) {
 +				if (decode) {
-+					value = qmi_get(wire + pos + j * width, width);
-+					qmi_host_put(host + e->offset + j * width,
-+					    value, width);
-+				} else {
-+					value = qmi_host_get(host + e->offset + j * width,
++					value = qmi_get(wire + pos + j * width,
 +					    width);
-+					qmi_put(wire + pos + j * width, value, width);
++					qmi_host_put(host + e->offset +
++					    j * width, value, width);
++				} else {
++					value = qmi_host_get(host + e->offset +
++					    j * width, width);
++					qmi_put(wire + pos + j * width, value,
++					    width);
 +				}
 +			}
 +		}
@@ -3539,9 +3578,9 @@ index 00000000000..9acdd9ca3ed
 +		}
 +		if (first == end || pos > capacity || capacity - pos < 3)
 +			return (-EMSGSIZE);
-+		error = qmi_fields(ei + first, end - first, __DECONST(uint8_t *, host),
-+		    size, wire + pos + 3, capacity - pos - 3, &used, false,
-+		    false, 0, false);
++		error = qmi_fields(ei + first, end - first,
++		    __DECONST(uint8_t *, host), size, wire + pos + 3,
++		    capacity - pos - 3, &used, false, false, 0, false);
 +		if (error != 0)
 +			return (-error);
 +		if (used > UINT16_MAX)
@@ -3575,7 +3614,8 @@ index 00000000000..9acdd9ca3ed
 +		if (bytes > length - pos || seen[type])
 +			return (EBADMSG);
 +		seen[type] = true;
-+		for (i = 0; i < QMI_SCHEMA_MAX && ei[i].data_type != QMI_EOTI; i++)
++		for (i = 0; i < QMI_SCHEMA_MAX &&
++		    ei[i].data_type != QMI_EOTI; i++)
 +			if (ei[i].tlv_type == type)
 +				break;
 +		if (i == QMI_SCHEMA_MAX)

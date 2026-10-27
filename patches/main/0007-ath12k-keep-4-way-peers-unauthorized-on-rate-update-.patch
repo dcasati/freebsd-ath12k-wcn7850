@@ -1,7 +1,7 @@
-From 098fd56334c0f1e9110af137f12c159bd9d9b035 Mon Sep 17 00:00:00 2001
+From 726a85915136bb7d7068bdee91450358864a0680 Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 20:43:29 -0600
-Subject: [PATCH 7/8] ath12k: keep 4-way peers unauthorized on rate-update
+Subject: [PATCH 07/10] ath12k: keep 4-way peers unauthorized on rate-update
  peer_assoc
 
 LinuxKPI issues a SUPP_RATES rate-control update right after

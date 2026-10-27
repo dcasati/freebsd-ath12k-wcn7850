@@ -1,7 +1,7 @@
-From 6397fc4bef3376c5bff929d7807b15e45317266c Mon Sep 17 00:00:00 2001
+From 08028b235cc6c66b4e4b422265e0b172420699dd Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 14:44:31 -0600
-Subject: [PATCH 6/8] ath12k: add WCN7850 support on FreeBSD
+Subject: [PATCH 06/10] ath12k: add WCN7850 support on FreeBSD
 
 Make the WCN7850 (hw2.0, PCI) work through LinuxKPI.  All changes to the
 vendor sources are under #if defined(__FreeBSD__) with the Linux code
@@ -55,7 +55,7 @@ Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
  sys/contrib/dev/athk/ath12k/qmi.h          |   6 +
  sys/contrib/dev/athk/ath12k/reg.c          | 472 ++++++++++++++++
  sys/contrib/dev/athk/ath12k/reg.h          |   4 +
- sys/contrib/dev/athk/ath12k/wifi7/core.c   |  17 +
+ sys/contrib/dev/athk/ath12k/wifi7/core.c   |  25 +
  sys/contrib/dev/athk/ath12k/wifi7/dp.c     |  17 +
  sys/contrib/dev/athk/ath12k/wifi7/dp_mon.c |  26 +
  sys/contrib/dev/athk/ath12k/wifi7/dp_rx.c  |  10 +
@@ -66,7 +66,7 @@ Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
  sys/contrib/dev/athk/ath12k/wifi7/pci.c    |   4 +
  sys/contrib/dev/athk/ath12k/wmi.c          | 581 +++++++++++++++++++
  sys/contrib/dev/athk/ath12k/wmi.h          | 158 ++++++
- 38 files changed, 3678 insertions(+)
+ 38 files changed, 3686 insertions(+)
  create mode 100644 sys/contrib/dev/athk/ath12k/dp_cc.h
 
 diff --git a/sys/contrib/dev/athk/ath12k/ce.c b/sys/contrib/dev/athk/ath12k/ce.c
@@ -4981,7 +4981,7 @@ index da5128b8c97..2be43f5cdf7 100644
  void ath12k_reg_reset_reg_info(struct ath12k_reg_info *reg_info);
  int ath12k_reg_handle_chan_list(struct ath12k_base *ab,
 diff --git a/sys/contrib/dev/athk/ath12k/wifi7/core.c b/sys/contrib/dev/athk/ath12k/wifi7/core.c
-index a02c57acf13..2f7f58c3178 100644
+index a02c57acf13..925bc940c64 100644
 --- a/sys/contrib/dev/athk/ath12k/wifi7/core.c
 +++ b/sys/contrib/dev/athk/ath12k/wifi7/core.c
 @@ -5,7 +5,9 @@
@@ -5045,6 +5045,18 @@ index a02c57acf13..2f7f58c3178 100644
  }
  
  module_init(ath12k_wifi7_init);
+@@ -66,3 +83,11 @@ module_exit(ath12k_wifi7_exit);
+ 
+ MODULE_DESCRIPTION("Driver support for Qualcomm Technologies 802.11be WLAN devices");
+ MODULE_LICENSE("Dual BSD/GPL");
++#if defined(__FreeBSD__)
++MODULE_VERSION(if_ath12k, 1);
++MODULE_DEPEND(if_ath12k, linuxkpi, 1, 1, 1);
++MODULE_DEPEND(if_ath12k, linuxkpi_wlan, 1, 1, 1);
++#if defined(CONFIG_ATH12K_DEBUGFS)
++MODULE_DEPEND(if_ath12k, lindebugfs, 1, 1, 1);
++#endif
++#endif
 diff --git a/sys/contrib/dev/athk/ath12k/wifi7/dp.c b/sys/contrib/dev/athk/ath12k/wifi7/dp.c
 index c72f604661c..636fbe1491a 100644
 --- a/sys/contrib/dev/athk/ath12k/wifi7/dp.c

@@ -1,0 +1,347 @@
+From 19ca047b8e185fac64f6af0626f488b0027637e1 Mon Sep 17 00:00:00 2001
+From: dcasati <dcasati@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 12:32:39 -0600
+Subject: [PATCH 13/14] tests: hook LinuxKPI wlan test modules into Kyua
+
+Add tests/sys/compat/linuxkpi so the LinuxKPI 802.11 harnesses from
+sys/tests/linuxkpi_wlan run under kyua(1) and install to
+/usr/tests/sys/compat/linuxkpi.
+
+wlan_kmod_test (atf-sh, root, exclusive) wraps the kernel test modules.
+They run their checks from MOD_LOAD, so a failing module makes kldload(8)
+fail with ENOEXEC and logs "MOD_LOAD (<name>, ...) error"; a passing one
+prints a fixed "passed" line.  Each case requires both a successful
+kldload and a new pass line in the message buffer, then unloads the
+module; a cleanup routine unloads it if the body did not.  Cases skip if
+the module is already loaded, if it cannot be found, or if LinuxKPI,
+linuxkpi_wlan or wlan are not already present (checked through their
+sysctl nodes, as they may be compiled into the kernel); the tests never
+load or unload those dependencies themselves.
+  - compat: lkpi_wlan_test (queues, RCU, lists, guards, tasklets, IEs,
+    skbs, rhashtable).  No hardware.
+  - regulatory: lkpi_regulatory_test (channel/rule translation, strict
+    TX gating).  No hardware.
+  - mhi: lkpi_mhi_test (MHI/QMI/CE/HTC/WMI models plus the MHI DMA
+    context layout).  It allocates DMA for an unbound WCN7850 at a fixed
+    address, so it requires the linuxkpi_mhi_pci=yes configuration
+    variable, an ATH12KHOST or ATH12KLAB kernel and an unattached
+    17cb:1107 function there; otherwise it skips without loading.
+
+dp_cc_test and station_port_test are the userland builds of the DP
+cookie layout and controlled-port checks; they need neither root nor
+hardware.
+
+The test modules are not part of buildkernel (neither is if_ath12k).
+Install them from sys/modules/tests/linuxkpi_{wlan,regulatory,mhi}, or
+point the tests at a build directory:
+
+  kyua -v test_suites.FreeBSD.linuxkpi_kmod_dir=/path/to/ko \
+      test -k /usr/tests/sys/compat/linuxkpi/Kyuafile
+
+lkpi_mhi_boot attaches to the PCI device and stays out.  The Python
+drivers compile pieces of the source tree with cc(1) at run time,
+qmi_codec_test needs kernel build options, and station_acceptance.sh
+drives a real AP from the lab guest; none of them can run from
+/usr/tests, so they remain source-tree tools.
+
+ktest(9) is not used yet: its only runner in stable/15 is
+atf_python/pytest over netlink, which would make python3 and pytest
+mandatory and requires restructuring every module into ktest cases.
+That remains the path for upstreaming.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+---
+ etc/mtree/BSD.tests.dist                    |   4 +
+ tests/sys/Makefile                          |   1 +
+ tests/sys/compat/Makefile                   |   7 +
+ tests/sys/compat/Makefile.inc               |   1 +
+ tests/sys/compat/linuxkpi/Makefile          |  23 +++
+ tests/sys/compat/linuxkpi/wlan_kmod_test.sh | 197 ++++++++++++++++++++
+ 6 files changed, 233 insertions(+)
+ create mode 100644 tests/sys/compat/Makefile
+ create mode 100644 tests/sys/compat/Makefile.inc
+ create mode 100644 tests/sys/compat/linuxkpi/Makefile
+ create mode 100644 tests/sys/compat/linuxkpi/wlan_kmod_test.sh
+
+diff --git a/etc/mtree/BSD.tests.dist b/etc/mtree/BSD.tests.dist
+index 3dd26ec6c5f..2740b4f5d00 100644
+--- a/etc/mtree/BSD.tests.dist
++++ b/etc/mtree/BSD.tests.dist
+@@ -815,6 +815,10 @@
+         ..
+         common
+         ..
++        compat
++            linuxkpi
++            ..
++        ..
+         compat32
+         ..
+         devrandom
+diff --git a/tests/sys/Makefile b/tests/sys/Makefile
+index 43862568336..8aa0b0491bd 100644
+--- a/tests/sys/Makefile
++++ b/tests/sys/Makefile
+@@ -9,6 +9,7 @@ TESTS_SUBDIRS+=		auditpipe
+ TESTS_SUBDIRS+=		cam
+ TESTS_SUBDIRS+=		capsicum
+ TESTS_SUBDIRS+=		${_cddl}
++TESTS_SUBDIRS+=		compat
+ # XXX: Currently broken in CI
+ #TESTS_SUBDIRS+=		compat32
+ TESTS_SUBDIRS+=		devrandom
+diff --git a/tests/sys/compat/Makefile b/tests/sys/compat/Makefile
+new file mode 100644
+index 00000000000..1d38f0b10ff
+--- /dev/null
++++ b/tests/sys/compat/Makefile
+@@ -0,0 +1,7 @@
++PACKAGE=		tests
++
++TESTSDIR=		${TESTSBASE}/sys/compat
++
++TESTS_SUBDIRS+=		linuxkpi
++
++.include <bsd.test.mk>
+diff --git a/tests/sys/compat/Makefile.inc b/tests/sys/compat/Makefile.inc
+new file mode 100644
+index 00000000000..01b5f23410c
+--- /dev/null
++++ b/tests/sys/compat/Makefile.inc
+@@ -0,0 +1 @@
++.include "../Makefile.inc"
+diff --git a/tests/sys/compat/linuxkpi/Makefile b/tests/sys/compat/linuxkpi/Makefile
+new file mode 100644
+index 00000000000..fa12386b8cb
+--- /dev/null
++++ b/tests/sys/compat/linuxkpi/Makefile
+@@ -0,0 +1,23 @@
++PACKAGE=		tests
++
++TESTSDIR=		${TESTSBASE}/sys/compat/linuxkpi
++
++.PATH:			${SRCTOP}/sys/tests/linuxkpi_wlan
++
++# Kernel test modules from sys/modules/tests/linuxkpi_*; they load,
++# check and unload kernel modules, so they must not run concurrently.
++ATF_TESTS_SH+=		wlan_kmod_test
++TEST_METADATA.wlan_kmod_test+=	is_exclusive="true"
++
++# Userland builds of the hardware-independent ath12k/LinuxKPI helpers.
++PLAIN_TESTS_C+=		dp_cc_test
++PLAIN_TESTS_C+=		station_port_test
++# dp_cc_test reports failures through assert(3).
++CFLAGS.dp_cc_test+=	-UNDEBUG
++
++# Not installed: the Python drivers in sys/tests/linuxkpi_wlan compile
++# fragments of the source tree with cc(1) at run time, qmi_codec_test needs
++# kernel build options, and station_acceptance.sh drives a real AP from the
++# ATH12KLAB guest.
++
++.include <bsd.test.mk>
+diff --git a/tests/sys/compat/linuxkpi/wlan_kmod_test.sh b/tests/sys/compat/linuxkpi/wlan_kmod_test.sh
+new file mode 100644
+index 00000000000..e2f1871e5e4
+--- /dev/null
++++ b/tests/sys/compat/linuxkpi/wlan_kmod_test.sh
+@@ -0,0 +1,197 @@
++#
++# SPDX-License-Identifier: BSD-2-Clause
++#
++# Wrappers for the LinuxKPI 802.11 kernel test modules built from
++# sys/modules/tests/linuxkpi_*.  Each module runs its checks from MOD_LOAD:
++# on failure MOD_LOAD returns an error, the kernel linker unloads the file
++# again and kldload(8) fails; on success the module prints a fixed "passed"
++# line and stays loaded until the test case unloads it.
++#
++# The modules are not part of the kernel build.  Build and install them with
++#	make -C /usr/src/sys/modules/tests/linuxkpi_wlan all install
++# or point Kyua at a build directory:
++#	kyua test -v test_suites.FreeBSD.linuxkpi_kmod_dir=/path/to/ko ...
++#
++# The test cases never load the LinuxKPI or net80211 modules they depend on;
++# they are skipped unless that support is already present.
++#
++
++# Set KMOD_PATH to the test module, or skip if it was not installed.
++find_kmod()
++{
++	local dir kmod
++
++	kmod=$1
++	KMOD_PATH=
++	dir=$(atf_config_get linuxkpi_kmod_dir "")
++	if [ -n "${dir}" ]; then
++		[ -f "${dir}/${kmod}.ko" ] && KMOD_PATH=${dir}/${kmod}.ko
++	else
++		for dir in $(sysctl -n kern.module_path | tr ';' ' '); do
++			if [ -f "${dir}/${kmod}.ko" ]; then
++				KMOD_PATH=${dir}/${kmod}.ko
++				break
++			fi
++		done
++	fi
++	if [ -z "${KMOD_PATH}" ]; then
++		atf_skip "${kmod}.ko is not installed (see sys/modules/tests" \
++		    "or set linuxkpi_kmod_dir)"
++	fi
++}
++
++# LinuxKPI may be compiled into the kernel, so check for its sysctl nodes
++# rather than for a loaded linuxkpi.ko or linuxkpi_wlan.ko.
++require_linuxkpi()
++{
++	sysctl -N compat.linuxkpi >/dev/null 2>&1 ||
++	    atf_skip "LinuxKPI (linuxkpi) is not loaded"
++}
++
++require_linuxkpi_wlan()
++{
++	require_linuxkpi
++	sysctl -N compat.linuxkpi.80211 >/dev/null 2>&1 ||
++	    atf_skip "LinuxKPI 802.11 support (linuxkpi_wlan) is not loaded"
++	kldstat -q -m wlan || atf_skip "net80211 (wlan) is not loaded"
++}
++
++marker_count()
++{
++	dmesg | grep -cF -- "$1"
++}
++
++# Load the test module, require the pass marker and unload the module.
++run_kmod()
++{
++	local after before failed kmod marker
++
++	kmod=$1
++	marker=$2
++	if kldstat -q -n "${kmod}.ko"; then
++		atf_skip "${kmod} is already loaded; unload it first"
++	fi
++	find_kmod "${kmod}"
++
++	before=$(marker_count "${marker}")
++	failed=$(marker_count "MOD_LOAD (${kmod},")
++	echo "${kmod}" > loaded_kmod
++	if ! kldload "${KMOD_PATH}"; then
++		rm -f loaded_kmod
++		dmesg | grep -F -e "${kmod}" -e "${3:-${kmod}}" | tail -n 20 >&2
++		if [ "$(marker_count "MOD_LOAD (${kmod},")" -gt "${failed}" ]
++		then
++			atf_fail "${kmod} reported a failure, see stderr"
++		fi
++		atf_fail "kldload ${KMOD_PATH} failed; it must match the" \
++		    "running kernel"
++	fi
++	after=$(marker_count "${marker}")
++	atf_check kldunload "${kmod}"
++	rm -f loaded_kmod
++	if [ "${after}" -le "${before}" ]; then
++		atf_fail "${kmod} loaded without reporting '${marker}'"
++	fi
++}
++
++# Unload the test module if the body loaded it and did not unload it.
++cleanup_kmod()
++{
++	local kmod
++
++	[ -f loaded_kmod ] || return 0
++	kmod=$(cat loaded_kmod)
++	if kldstat -q -n "${kmod}.ko"; then
++		kldunload "${kmod}"
++	fi
++}
++
++atf_test_case compat cleanup
++compat_head()
++{
++	atf_set descr "LinuxKPI mac80211 queue, RCU, list, guard, tasklet," \
++	    "IE, skb and rhashtable checks (lkpi_wlan_test)"
++	atf_set require.user root
++}
++compat_body()
++{
++	require_linuxkpi_wlan
++	run_kmod lkpi_wlan_test "lkpi_wlan_test: queue, RCU, list, guard," \
++	    lkpi_rhashtable_test
++}
++compat_cleanup()
++{
++	cleanup_kmod
++}
++
++atf_test_case regulatory cleanup
++regulatory_head()
++{
++	atf_set descr "LinuxKPI regulatory channel/rule translation and" \
++	    "strict-mode TX gating (lkpi_regulatory_test)"
++	atf_set require.user root
++}
++regulatory_body()
++{
++	require_linuxkpi_wlan
++	run_kmod lkpi_regulatory_test "lkpi_regulatory_test: passed"
++}
++regulatory_cleanup()
++{
++	cleanup_kmod
++}
++
++atf_test_case mhi cleanup
++mhi_head()
++{
++	atf_set descr "LinuxKPI MHI/QMI/CE/HTC/WMI protocol models and MHI" \
++	    "DMA context layout (lkpi_mhi_test); needs an unbound WCN7850"
++	atf_set require.user root
++	atf_set require.config linuxkpi_mhi_pci
++}
++mhi_body()
++{
++	local line sel
++
++	if [ "$(atf_config_get linuxkpi_mhi_pci)" != "yes" ]; then
++		atf_skip "set linuxkpi_mhi_pci=yes to allow DMA on the device"
++	fi
++	# lkpi_mhi_test allocates its DMA rings for the device at a fixed
++	# address in the ATH12KHOST and ATH12KLAB configurations.
++	case "$(sysctl -n kern.ident)" in
++	ATH12KHOST)
++		sel=pci0:194:0:0
++		;;
++	ATH12KLAB)
++		sel=pci0:0:6:0
++		;;
++	*)
++		atf_skip "needs an ATH12KHOST or ATH12KLAB kernel"
++		;;
++	esac
++	line=$(pciconf -l "${sel}" 2>/dev/null)
++	case "${line}" in
++	none*vendor=0x17cb\ device=0x1107\ subvendor=0x17aa\ subdevice=0xe0e6*)
++		;;
++	"")
++		atf_skip "no PCI function at ${sel}"
++		;;
++	*)
++		atf_skip "${sel} is not an unbound WCN7850: ${line}"
++		;;
++	esac
++	require_linuxkpi_wlan
++	run_kmod lkpi_mhi_test "lkpi_mhi_test: DMA contexts, rings," \
++	    mhi_lab_
++}
++mhi_cleanup()
++{
++	cleanup_kmod
++}
++
++atf_init_test_cases()
++{
++	atf_add_test_case compat
++	atf_add_test_case regulatory
++	atf_add_test_case mhi
++}
+-- 
+2.56.0
+

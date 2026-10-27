@@ -1,0 +1,34 @@
+From d50d326e96d79cb6ea3f06a518bb20630e952505 Mon Sep 17 00:00:00 2001
+From: dcasati <dcasati@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 12:25:48 -0600
+Subject: [PATCH 10/10] ath12k: fix ATH12K_DEBUGFS build on FreeBSD
+
+u64 is unsigned long on FreeBSD/LP64 rather than unsigned long long as
+on Linux; cast the dlpager page timestamp for the %llu format to fix the
+-Wformat error when building with ATH12K_DEBUGFS.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+---
+ sys/contrib/dev/athk/ath12k/debugfs_htt_stats.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/sys/contrib/dev/athk/ath12k/debugfs_htt_stats.c b/sys/contrib/dev/athk/ath12k/debugfs_htt_stats.c
+index 7f6ca07fb33..34586be0b6e 100644
+--- a/sys/contrib/dev/athk/ath12k/debugfs_htt_stats.c
++++ b/sys/contrib/dev/athk/ath12k/debugfs_htt_stats.c
+@@ -3629,7 +3629,12 @@ static void ath12k_htt_print_dlpager_entry(const struct ath12k_htt_pgs_info *pg_
+ 			  idx, le32_to_cpu(pg_info->page_num));
+ 	index += snprintf(&str_buf[index], ATH12K_HTT_MAX_STRING_LEN - index,
+ 			  "Num of pages - %u ; Timestamp - %lluus\n",
++#if defined(__FreeBSD__)
++			  le32_to_cpu(pg_info->num_pgs),
++			  (unsigned long long)page_timestamp);
++#else
+ 			  le32_to_cpu(pg_info->num_pgs), page_timestamp);
++#endif
+ }
+ 
+ static void
+-- 
+2.56.0
+

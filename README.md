@@ -10,6 +10,9 @@ Status: station mode with WPA2-PSK works on 2.4 GHz (20 MHz) and 5 GHz (HT40/VHT
 - Kernel memory: with the separate LinuxKPI txq fix, `lkpi80211` no longer grows across unload/reload (it grew 16 KiB per cycle before).
 - iperf3 on 5 GHz VHT80: TCP 337 Mb/s down (370 Mb/s with 4 streams) and 338 Mb/s up; UDP 350 Mb/s down at 0% loss. These numbers are limited by the access point's CPU.
 - The in-kernel regulatory test and the regulatory model test pass.
+- Kyua: `tests/sys/compat/linuxkpi` (local patch 0013) runs the LinuxKPI test modules: 3 passed and 2 skipped (one needs a WCN7850 with no driver attached, one was not run on this host), 0 failed.
+
+Open issues: idr/taskqueue/lkpikmalloc still grow slightly on each unload/reload; in one of four delayed-association tests traffic did not resume after reconnect (TX/RX errors, no DHCP lease) until the service was restarted. That run overlapped with `lkpi_regulatory_test` loads on the live kernel, which register a second LinuxKPI 802.11 device, so run the Kyua kernel tests on a machine that is not using Wi-Fi until this is understood.
 
 QMI is implemented in LinuxKPI (`linux_qmi*.c`), and ath12k uses the stock `qmi_handle_init` path. Strict regulatory enables 40/80 MHz on 5 GHz only within allowed 80 MHz blocks. NO_IR and DFS channels are passive. 160 MHz and 6 GHz are not enabled.
 
@@ -17,20 +20,21 @@ QMI is implemented in LinuxKPI (`linux_qmi*.c`), and ath12k uses the stock `qmi_
 
 | Path | Contents |
 |------|----------|
-| `patches/stable-15/0001-0008` | Upstream candidate series against freebsd-src `stable/15` at `169e254b` (hardware-validated base) |
-| `patches/main/0001-0008` | The same series rebased onto freebsd-src `main` at `91bff7d7ed4` (no conflicts) |
-| `patches/local/0009-0011` | Local only, not for upstream: ATH12KHOST/ATH12KLAB kernel configs, test harnesses, rc.d script. Apply on top of `stable-15` |
+| `patches/stable-15/0001-0010` | Upstream candidate series against freebsd-src `stable/15` at `169e254b` (hardware-validated base) |
+| `patches/main/0001-0010` | The same series rebased onto freebsd-src `main` at `91bff7d7ed4` (no conflicts) |
+| `patches/local/0011-0014` | Local only, not for upstream: ATH12KHOST/ATH12KLAB kernel configs, test harnesses, Kyua hookup for the test modules (`tests/sys/compat/linuxkpi`), rc.d script. Apply on top of `stable-15` |
 | `patches/linuxkpi-txq-leak/0001` | Separate LinuxKPI 802.11 fix, independent of ath12k: free the per-TID txqs in `lkpi_lsta_free()`. Applies unchanged to `stable/15`, `main`, or on top of either series |
-| `tools/ath12k_wlan.rc` | rc.d script that brings up `wlan0` at boot (also in `local/0011`) |
+| `tools/ath12k_wlan.rc` | rc.d script that brings up `wlan0` at boot (also in `local/0014`) |
 | `tools/plot-results.pl` | Renders the CSV data under `results/` as SVG charts |
+| `tools/finalize-authorship.sh` | Rewrites a branch to a real author/committer identity and adds `Signed-off-by` (and optionally converts or drops the Copilot trailer) before submitting upstream |
 | `results/` | Hardware test results: numbers, charts, raw data |
 
-The upstream series is split for review: one ath12k Makefile fix, the net80211 hook, LinuxKPI primitives, LinuxKPI MHI/QMI, LinuxKPI 802.11, ath12k WCN7850 support, the ath12k 4-way handshake fix, and the ath12k(4) manual page.
+The upstream series is split for review: one ath12k Makefile fix, the net80211 hook, LinuxKPI primitives, LinuxKPI MHI/QMI, LinuxKPI 802.11, ath12k WCN7850 support, the ath12k 4-way handshake fix, the ath12k(4) manual page, the LinuxKPI helpers for ath12k debugfs, and the ath12k debugfs build fix.
 
 - Changes to vendor code in `sys/contrib/dev/athk` are additive only: each one is wrapped in `#if defined(__FreeBSD__)` and keeps the original Linux code under `#else`.
-- Native code follows style(9).
+- Native code follows style(9): `tools/build/checkstyle9.pl` reports 0 errors and 0 warnings outside `sys/contrib`. `mandoc -Tlint` is clean on both manual pages.
 - On both bases, every commit builds GENERIC and the LinuxKPI/wlan/athk/iwlwifi/rtw/mt76 modules with no new warnings. This was checked per commit after the latest fold.
-- `if_ath12k.ko` builds from 0006 on. The module is not in `sys/modules/Makefile`.
+- `if_ath12k.ko` builds from 0006 on, and with `ATH12K_DEBUGFS=1` from 0010 on. It declares `MODULE_VERSION` and depends on `linuxkpi`, `linuxkpi_wlan` (and `lindebugfs` with debugfs), so `kldload` pulls them in on kernels without them compiled in. The module is not in `sys/modules/Makefile`.
 - `ath11k` fails to build at both bases, before any patch is applied.
 
 ## Apply and build
@@ -52,6 +56,8 @@ The LinuxKPI txq leak fix is separate and recommended, especially if you unload 
 Firmware: the driver reads the raw images from `/boot/firmware/ath12k/WCN7850/hw2.0/`. Do not also `kldload` the firmware kld (`ath12k_wcn7850_fw`). `devmatch` loads `if_ath12k` early in boot, so the kld then fails with `firmware_register: ... already registered` / `MOD_LOAD ... error 6`. The `kldload: ... Unsupported file layout` lines at attach are harmless: firmware(9) probes each raw image as a kld before falling back to reading the file.
 
 Install `tools/ath12k_wlan.rc` as `/usr/local/etc/rc.d/ath12k_wlan` and set `ath12k_wlan_enable="YES"`. Keep backups out of `rc.d`: `rc` runs every file there except `*.bak`, `*.orig`, `*.OLD`, `*~` and `*,v`.
+
+With `ath12k_wlan_dhcp="YES"` (default) the script does not start `dhclient` right away: a `wpa_cli -a` action daemon starts it on association, so DHCP also works when association happens late.
 
 Tunables (`/boot/loader.conf`):
 

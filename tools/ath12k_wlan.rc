@@ -15,6 +15,13 @@
 # ath12k_wlan_kernel="/boot/kernel.ath12k-*/kernel"  (glob)
 # ath12k_wlan_dhcp="YES"
 # ath12k_wlan_args="scanvalid 10"  (extra ifconfig args; see below)
+#
+# With ath12k_wlan_dhcp, dhclient is not started right after
+# wpa_supplicant: it gives up if the link is not up within ~10s, and
+# devd's LINK_UP rule only restarts it for ifconfig_<if>="DHCP"
+# interfaces.  A wpa_cli(8) action daemon runs this script on every
+# association instead and starts dhclient if it is not running; a
+# running dhclient follows later disassociations by itself.
 
 . /etc/rc.subr
 
@@ -39,6 +46,13 @@ load_rc_config $name
 parent="ath12k_wifi70"
 wpa_pid="/var/run/wpa_supplicant.${ath12k_wlan_if}.pid"
 dhc_pid="/var/run/dhclient/dhclient.${ath12k_wlan_if}.pid"
+cli_pid="/var/run/wpa_cli.${ath12k_wlan_if}.pid"
+
+ath12k_wlan_dhclient()
+{
+	pgrep -F "${dhc_pid}" >/dev/null 2>&1 && return 0
+	/sbin/dhclient -b "${ath12k_wlan_if}"
+}
 
 ath12k_wlan_start()
 {
@@ -72,8 +86,15 @@ ath12k_wlan_start()
 		/usr/sbin/wpa_supplicant -B -i "${ath12k_wlan_if}" \
 		    -c "${ath12k_wlan_conf}" -P "${wpa_pid}" || return 1
 	fi
-	if checkyesno ath12k_wlan_dhcp && ! pgrep -F "${dhc_pid}" >/dev/null 2>&1; then
-		/sbin/dhclient -b "${ath12k_wlan_if}"
+	if checkyesno ath12k_wlan_dhcp; then
+		if ! pgrep -F "${cli_pid}" >/dev/null 2>&1; then
+			/usr/sbin/wpa_cli -B -i "${ath12k_wlan_if}" \
+			    -P "${cli_pid}" -a "$(realpath "$0")" || return 1
+		fi
+		# wpa_cli only reports associations made after it attached.
+		if ifconfig "${ath12k_wlan_if}" | grep -q 'status: associated'; then
+			ath12k_wlan_dhclient
+		fi
 	fi
 	echo "${ath12k_wlan_if} started on ${parent}."
 }
@@ -81,6 +102,7 @@ ath12k_wlan_start()
 ath12k_wlan_stop()
 {
 	# Interface teardown only; the driver stays loaded.
+	[ -f "${cli_pid}" ] && pkill -F "${cli_pid}"
 	[ -f "${dhc_pid}" ] && pkill -F "${dhc_pid}"
 	[ -f "${wpa_pid}" ] && pkill -F "${wpa_pid}"
 	sleep 1
@@ -88,7 +110,7 @@ ath12k_wlan_stop()
 		ifconfig "${ath12k_wlan_if}" down
 		ifconfig "${ath12k_wlan_if}" destroy
 	fi
-	rm -f "${wpa_pid}"
+	rm -f "${wpa_pid}" "${cli_pid}"
 }
 
 ath12k_wlan_status()
@@ -100,5 +122,12 @@ ath12k_wlan_status()
 	ifconfig "${ath12k_wlan_if}" | grep -E 'status:|inet '
 	wpa_cli -i "${ath12k_wlan_if}" status 2>/dev/null | grep '^wpa_state='
 }
+
+# wpa_cli(8) action mode runs this script as "<ifname> <event> [...]".
+if [ "$1" = "${ath12k_wlan_if}" ]; then
+	[ "$2" = "CONNECTED" ] && checkyesno ath12k_wlan_dhcp &&
+	    ath12k_wlan_dhclient
+	exit 0
+fi
 
 run_rc_command "$1"

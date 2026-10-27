@@ -1,0 +1,165 @@
+From 9ad88e9ba8b7baf94d9646012eb3dfa97f4238ff Mon Sep 17 00:00:00 2001
+From: dcasati <dcasati@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 12:25:47 -0600
+Subject: [PATCH 09/10] LinuxKPI: add helpers needed by ath12k debugfs
+
+ath12k fails to build with CONFIG_ATH12K_DEBUGFS as it relies on a
+number of Linux APIs which LinuxKPI did not provide yet:
+
+- simple_write_to_buffer(), the counterpart to the existing
+  simple_read_from_buffer().  Also make the source argument of
+  simple_read_from_buffer() const as it is on Linux so callers can pass
+  constant strings without discarding qualifiers.
+- no_free_ptr() and return_ptr() to transfer ownership out of
+  __free() annotated variables.
+- dput(); lindebugfs does not reference count dentries, so this is a
+  no-op.
+- the wiphy guard so guard(wiphy)() and scoped_guard(wiphy, ...) can
+  be used.
+
+In addition, debugfs_lookup() dereferenced a NULL parent, while on
+Linux a NULL parent refers to the debugfs root (as for the other
+debugfs_create_*() functions).  ath11k and ath12k both look up their
+top-level directory that way.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+---
+ sys/compat/lindebugfs/lindebugfs.c            |  5 ++-
+ .../linuxkpi/common/include/linux/cleanup.h   | 12 ++++++
+ .../linuxkpi/common/include/linux/dcache.h    |  9 ++++
+ sys/compat/linuxkpi/common/include/linux/fs.h | 42 ++++++++++++++++++-
+ .../linuxkpi/common/include/net/cfg80211.h    |  2 +
+ 5 files changed, 67 insertions(+), 3 deletions(-)
+
+diff --git a/sys/compat/lindebugfs/lindebugfs.c b/sys/compat/lindebugfs/lindebugfs.c
+index b79990ae36d..e0f5cc71c4c 100644
+--- a/sys/compat/lindebugfs/lindebugfs.c
++++ b/sys/compat/lindebugfs/lindebugfs.c
+@@ -368,7 +368,10 @@ debugfs_lookup(const char *name, struct dentry *parent)
+ 	struct dentry *dnode;
+ 	struct pfs_node *pnode;
+ 
+-	pnode = pfs_find_node(parent->d_pfs_node, name);
++	if (parent == NULL)
++		pnode = pfs_find_node(debugfs_root, name);
++	else
++		pnode = pfs_find_node(parent->d_pfs_node, name);
+ 	if (pnode == NULL)
+ 		return (NULL);
+ 
+diff --git a/sys/compat/linuxkpi/common/include/linux/cleanup.h b/sys/compat/linuxkpi/common/include/linux/cleanup.h
+index 815cdc37a95..c67f7bf04d6 100644
+--- a/sys/compat/linuxkpi/common/include/linux/cleanup.h
++++ b/sys/compat/linuxkpi/common/include/linux/cleanup.h
+@@ -187,4 +187,16 @@ _l:									\
+ #define	scoped_guard(_n, ...)						\
+     _scoped_guard(_n, ___label_ ## __COUNTER__, ##__VA_ARGS__)
+ 
++/*
++ * Take ownership of a pointer away from a __free() annotated variable.
++ * The variable is set to NULL so its cleanup function becomes a no-op.
++ */
++#define	no_free_ptr(_p)							\
++    ({									\
++	__typeof(_p) __nfp_v = (_p);					\
++	(_p) = NULL;							\
++	__nfp_v;							\
++    })
++#define	return_ptr(_p)		return (no_free_ptr(_p))
++
+ #endif	/* _LINUXKPI_LINUX_CLEANUP_H */
+diff --git a/sys/compat/linuxkpi/common/include/linux/dcache.h b/sys/compat/linuxkpi/common/include/linux/dcache.h
+index 992d6f7c272..48edeb52082 100644
+--- a/sys/compat/linuxkpi/common/include/linux/dcache.h
++++ b/sys/compat/linuxkpi/common/include/linux/dcache.h
+@@ -42,4 +42,13 @@ d_inode(const struct dentry *dentry)
+ 	return (dentry->d_inode);
+ }
+ 
++/*
++ * lindebugfs does not reference count dentries (e.g., the ones returned by
++ * debugfs_lookup()), so there is nothing to release.
++ */
++static inline void
++dput(struct dentry *dentry __unused)
++{
++}
++
+ #endif /* _LINUXKPI_LINUX_DCACHE_H */
+diff --git a/sys/compat/linuxkpi/common/include/linux/fs.h b/sys/compat/linuxkpi/common/include/linux/fs.h
+index 2cfa31a4e32..b751a7e4b71 100644
+--- a/sys/compat/linuxkpi/common/include/linux/fs.h
++++ b/sys/compat/linuxkpi/common/include/linux/fs.h
+@@ -374,9 +374,9 @@ i_size_write(struct inode *inode, loff_t i_size)
+  */
+ static inline ssize_t
+ simple_read_from_buffer(void __user *dest, size_t read_size, loff_t *ppos,
+-    void *orig, size_t buf_size)
++    const void *orig, size_t buf_size)
+ {
+-	void *read_pos = ((char *) orig) + *ppos;
++	const void *read_pos = ((const char *) orig) + *ppos;
+ 	size_t buf_remain = buf_size - *ppos;
+ 	ssize_t num_read;
+ 
+@@ -395,6 +395,44 @@ simple_read_from_buffer(void __user *dest, size_t read_size, loff_t *ppos,
+ 	return (num_read);
+ }
+ 
++/*
++ * simple_write_to_buffer: copy data from user-space origin
++ * buffer into kernel-space destination buffer
++ *
++ * @dest: destination buffer
++ * @buf_size: size of destination buffer
++ * @ppos: starting transfer position pointer
++ * @orig: origin buffer
++ * @write_size: number of bytes to be transferred
++ *
++ * Return value:
++ * On success, total bytes copied with *ppos incremented accordingly.
++ * On failure, negative value.
++ */
++static inline ssize_t
++simple_write_to_buffer(void *dest, size_t buf_size, loff_t *ppos,
++    const void *orig, size_t write_size)
++{
++	loff_t pos = *ppos;
++	size_t not_copied;
++
++	if (pos < 0)
++		return (-EINVAL);
++	if (pos >= buf_size || write_size == 0)
++		return (0);
++	if (write_size > buf_size - pos)
++		write_size = buf_size - pos;
++
++	/* copy_from_user returns number of bytes NOT copied */
++	not_copied = copy_from_user((char *)dest + pos, orig, write_size);
++	if (not_copied == write_size)
++		return (-EFAULT);
++	write_size -= not_copied;
++	*ppos = pos + write_size;
++
++	return (write_size);
++}
++
+ MALLOC_DECLARE(M_LSATTR);
+ 
+ #define	__DEFINE_SIMPLE_ATTRIBUTE(__fops, __get, __set, __fmt, __wrfunc)\
+diff --git a/sys/compat/linuxkpi/common/include/net/cfg80211.h b/sys/compat/linuxkpi/common/include/net/cfg80211.h
+index 6ad2d5f06d3..1bd7a9a2d8e 100644
+--- a/sys/compat/linuxkpi/common/include/net/cfg80211.h
++++ b/sys/compat/linuxkpi/common/include/net/cfg80211.h
+@@ -1480,6 +1480,8 @@ wiphy_dev(struct wiphy *wiphy)
+ #define	wiphy_lock(_w)		mutex_lock(&(_w)->mtx)
+ #define	wiphy_unlock(_w)	mutex_unlock(&(_w)->mtx)
+ 
++DEFINE_GUARD(wiphy, struct wiphy *, wiphy_lock(_T), wiphy_unlock(_T))
++
+ static __inline void
+ wiphy_rfkill_set_hw_state_reason(struct wiphy *wiphy, bool blocked,
+     enum rfkill_hard_block_reasons reason)
+-- 
+2.56.0
+

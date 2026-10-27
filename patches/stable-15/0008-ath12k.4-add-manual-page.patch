@@ -1,7 +1,7 @@
-From 521f3146b3b18a3102d30f0ef17ef13bcfa6a52c Mon Sep 17 00:00:00 2001
+From c21e416fec140e2fd5649f041c7d2d64d2a7dc31 Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
 Date: Mon, 26 Oct 2026 13:01:02 -0600
-Subject: [PATCH 8/8] ath12k.4: add manual page
+Subject: [PATCH 08/10] ath12k.4: add manual page
 
 Document the LinuxKPI-based ath12k driver for the Qualcomm WCN7850,
 following the layout of rtw88.4 and rtw89.4: loading, the firmware
@@ -16,8 +16,8 @@ module is not built from sys/modules/Makefile.
 Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
 ---
  share/man/man4/ath12k.4        | 156 +++++++++++++++++++++++++++++++++
- share/man/man4/linuxkpi_wlan.4 |   4 +-
- 2 files changed, 159 insertions(+), 1 deletion(-)
+ share/man/man4/linuxkpi_wlan.4 |   2 +
+ 2 files changed, 158 insertions(+)
  create mode 100644 share/man/man4/ath12k.4
 
 diff --git a/share/man/man4/ath12k.4 b/share/man/man4/ath12k.4
@@ -183,18 +183,9 @@ index 00000000000..657c90f7524
 +.Pp
 +Host AP mode is not supported and monitor mode has not been tested.
 diff --git a/share/man/man4/linuxkpi_wlan.4 b/share/man/man4/linuxkpi_wlan.4
-index fa0b15b5e0b..d37b262e4cb 100644
+index fa0b15b5e0b..358ccc16398 100644
 --- a/share/man/man4/linuxkpi_wlan.4
 +++ b/share/man/man4/linuxkpi_wlan.4
-@@ -6,7 +6,7 @@
- .\" This documentation was written by Bj\xc3\xb6rn Zeeb under sponsorship from
- .\" the FreeBSD Foundation.
- .\"
--.Dd May 23, 2026
-+.Dd October 26, 2026
- .Dt LINUXKPI_WLAN 4
- .Os
- .Sh NAME
 @@ -66,6 +66,7 @@ support, it was decided not to do so given
  has been deprecated since 2004.
  .Pp

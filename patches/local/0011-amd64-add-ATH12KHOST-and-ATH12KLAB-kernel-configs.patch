@@ -1,7 +1,7 @@
-From f81636e0cb238f0e99647b00d4b2729853e0a386 Mon Sep 17 00:00:00 2001
+From b40d42332de5326fb263dd1bb5f5f9c311c997b2 Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 14:44:31 -0600
-Subject: [PATCH 09/11] amd64: add ATH12KHOST and ATH12KLAB kernel configs
+Subject: [PATCH 11/14] amd64: add ATH12KHOST and ATH12KLAB kernel configs
 
 GENERIC plus INVARIANTS/WITNESS for ath12k bring-up.
 

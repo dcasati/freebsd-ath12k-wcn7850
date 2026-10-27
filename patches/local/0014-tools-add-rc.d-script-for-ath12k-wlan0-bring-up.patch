@@ -1,30 +1,39 @@
-From 39f4e65ce0aef3397900ac37970681d607f04965 Mon Sep 17 00:00:00 2001
+From 4ffdbf20e7fea1921377e943c2baa74cf45853a7 Mon Sep 17 00:00:00 2001
 From: dcasati <dcasati@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 20:57:22 -0600
-Subject: [PATCH 11/11] tools: add rc.d script for ath12k wlan0 bring-up
+Subject: [PATCH 14/14] tools: add rc.d script for ath12k wlan0 bring-up
 
 rc.conf's wlans_<parent> parser rejects ath12k_wifi70, so create
 wlan0 and run wpa_supplicant and dhclient from a dedicated rc script.
 Firmware kld collisions at load time are not treated as fatal.
-ath12k_wlan_args (default "scanvalid 10") is passed to ifconfig: with
-the net80211 default of 60 s, one missed scan after a disconnect
-stalls reconnection for about a minute.
+ath12k_wlan_args (default "scanvalid 10") is passed to ifconfig so a
+missed scan after a disconnect does not stall reconnects for ~60s.
+
+dhclient is not started right after wpa_supplicant: it gives up if
+the link is not up within ~10s, and devd's LINK_UP rule only restarts
+it for interfaces with ifconfig_<if>="DHCP", so a late association
+left wlan0 without an address.  With ath12k_wlan_dhcp="YES" (default)
+a wpa_cli(8) action daemon (-a pointing at this script) starts dhclient
+on every CONNECTED event if it is not running, and start also runs it
+if the interface is already associated.  A running dhclient follows
+later disassociations itself.  stop kills wpa_cli before dhclient and
+wpa_supplicant.  No new rc.conf variables.
 
 Local workaround only; the real fix belongs in the rc.d network
 scripts.
 
 Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
 ---
- tools/tools/ath12k/ath12k_wlan.rc | 104 ++++++++++++++++++++++++++++++
- 1 file changed, 104 insertions(+)
+ tools/tools/ath12k/ath12k_wlan.rc | 133 ++++++++++++++++++++++++++++++
+ 1 file changed, 133 insertions(+)
  create mode 100755 tools/tools/ath12k/ath12k_wlan.rc
 
 diff --git a/tools/tools/ath12k/ath12k_wlan.rc b/tools/tools/ath12k/ath12k_wlan.rc
 new file mode 100755
-index 00000000000..42441b09eea
+index 00000000000..37f71b96eaf
 --- /dev/null
 +++ b/tools/tools/ath12k/ath12k_wlan.rc
-@@ -0,0 +1,104 @@
+@@ -0,0 +1,133 @@
 +#!/bin/sh
 +#
 +# PROVIDE: ath12k_wlan
@@ -42,6 +51,13 @@ index 00000000000..42441b09eea
 +# ath12k_wlan_kernel="/boot/kernel.ath12k-*/kernel"  (glob)
 +# ath12k_wlan_dhcp="YES"
 +# ath12k_wlan_args="scanvalid 10"  (extra ifconfig args; see below)
++#
++# With ath12k_wlan_dhcp, dhclient is not started right after
++# wpa_supplicant: it gives up if the link is not up within ~10s, and
++# devd's LINK_UP rule only restarts it for ifconfig_<if>="DHCP"
++# interfaces.  A wpa_cli(8) action daemon runs this script on every
++# association instead and starts dhclient if it is not running; a
++# running dhclient follows later disassociations by itself.
 +
 +. /etc/rc.subr
 +
@@ -66,6 +82,13 @@ index 00000000000..42441b09eea
 +parent="ath12k_wifi70"
 +wpa_pid="/var/run/wpa_supplicant.${ath12k_wlan_if}.pid"
 +dhc_pid="/var/run/dhclient/dhclient.${ath12k_wlan_if}.pid"
++cli_pid="/var/run/wpa_cli.${ath12k_wlan_if}.pid"
++
++ath12k_wlan_dhclient()
++{
++	pgrep -F "${dhc_pid}" >/dev/null 2>&1 && return 0
++	/sbin/dhclient -b "${ath12k_wlan_if}"
++}
 +
 +ath12k_wlan_start()
 +{
@@ -99,8 +122,15 @@ index 00000000000..42441b09eea
 +		/usr/sbin/wpa_supplicant -B -i "${ath12k_wlan_if}" \
 +		    -c "${ath12k_wlan_conf}" -P "${wpa_pid}" || return 1
 +	fi
-+	if checkyesno ath12k_wlan_dhcp && ! pgrep -F "${dhc_pid}" >/dev/null 2>&1; then
-+		/sbin/dhclient -b "${ath12k_wlan_if}"
++	if checkyesno ath12k_wlan_dhcp; then
++		if ! pgrep -F "${cli_pid}" >/dev/null 2>&1; then
++			/usr/sbin/wpa_cli -B -i "${ath12k_wlan_if}" \
++			    -P "${cli_pid}" -a "$(realpath "$0")" || return 1
++		fi
++		# wpa_cli only reports associations made after it attached.
++		if ifconfig "${ath12k_wlan_if}" | grep -q 'status: associated'; then
++			ath12k_wlan_dhclient
++		fi
 +	fi
 +	echo "${ath12k_wlan_if} started on ${parent}."
 +}
@@ -108,6 +138,7 @@ index 00000000000..42441b09eea
 +ath12k_wlan_stop()
 +{
 +	# Interface teardown only; the driver stays loaded.
++	[ -f "${cli_pid}" ] && pkill -F "${cli_pid}"
 +	[ -f "${dhc_pid}" ] && pkill -F "${dhc_pid}"
 +	[ -f "${wpa_pid}" ] && pkill -F "${wpa_pid}"
 +	sleep 1
@@ -115,7 +146,7 @@ index 00000000000..42441b09eea
 +		ifconfig "${ath12k_wlan_if}" down
 +		ifconfig "${ath12k_wlan_if}" destroy
 +	fi
-+	rm -f "${wpa_pid}"
++	rm -f "${wpa_pid}" "${cli_pid}"
 +}
 +
 +ath12k_wlan_status()
@@ -127,6 +158,13 @@ index 00000000000..42441b09eea
 +	ifconfig "${ath12k_wlan_if}" | grep -E 'status:|inet '
 +	wpa_cli -i "${ath12k_wlan_if}" status 2>/dev/null | grep '^wpa_state='
 +}
++
++# wpa_cli(8) action mode runs this script as "<ifname> <event> [...]".
++if [ "$1" = "${ath12k_wlan_if}" ]; then
++	[ "$2" = "CONNECTED" ] && checkyesno ath12k_wlan_dhcp &&
++	    ath12k_wlan_dhclient
++	exit 0
++fi
 +
 +run_rc_command "$1"
 -- 
