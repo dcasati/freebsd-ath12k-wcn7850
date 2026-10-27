@@ -6,8 +6,8 @@ through LinuxKPI.
 
 **Status:** WPA2-PSK station mode works on 2.4 GHz (20 MHz) and 5 GHz
 (HT40/VHT80) on FreeBSD 15.1, tested on a Lenovo ThinkPad T14s Gen 6,
-with unattended bring-up at boot, DHCP
-and ping. See the [test results](results/2026-10-27/README.md).
+with unattended bring-up at boot, DHCP and ping. See the
+[test results](results/2026-10-27/README.md).
 
 The hardware runs used the previous revision of the stable/15 series.
 The current revision adds style, module-dependency, debugfs-build and
