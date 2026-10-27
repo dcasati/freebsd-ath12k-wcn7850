@@ -1,0 +1,96 @@
+From 94738614d288cfd76c0bb4c2a09313555f49f720 Mon Sep 17 00:00:00 2001
+From: dcasati <dcasati@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 12:05:18 -0600
+Subject: [PATCH] LinuxKPI: 802.11: free per-TID txqs when freeing an lsta
+
+lkpi_lsta_alloc() allocates one struct lkpi_txq for each sta->txq[]
+slot, but lkpi_lsta_free() never released them.  Every freed station
+leaked IEEE80211_NUM_TIDS txqs (one more with STA_MMPDU_TXQ), about
+4 KiB, to M_LKPI80211, so station churn and driver unload/reload grow
+it without bound.  With if_ath12k on WCN7850 each kldunload/kldload
+cycle leaked 64 allocations (16 KiB).
+
+In lkpi_lsta_free(), take each txq off the hardware scheduled list if
+it is still linked, free any skbs left in it, destroy its lock and
+free it.
+
+Also fix the lkpi_lsta_alloc() error path: it freed sta->txq[tid]
+(the embedded ieee80211_txq) rather than the containing lkpi_txq, and
+dereferenced slots left NULL (the MMPDU slot is optional).
+
+Tested on WCN7850 (if_ath12k): over 20 unload/reload cycles
+M_LKPI80211 went from +1280 allocations (+320 KiB) to no change.
+20 reconnect cycles and a 15-minute ping soak showed no growth.
+---
+ sys/compat/linuxkpi/common/src/linux_80211.c | 38 +++++++++++++++++++-
+ 1 file changed, 37 insertions(+), 1 deletion(-)
+
+diff --git a/sys/compat/linuxkpi/common/src/linux_80211.c b/sys/compat/linuxkpi/common/src/linux_80211.c
+index 562940e35eb..8e1fd065c15 100644
+--- a/sys/compat/linuxkpi/common/src/linux_80211.c
++++ b/sys/compat/linuxkpi/common/src/linux_80211.c
+@@ -1151,9 +1151,11 @@ lkpi_lsta_alloc(struct ieee80211vap *vap, const uint8_t mac[IEEE80211_ADDR_LEN],
+ 	for (; tid >= 0; tid--) {
+ 		struct lkpi_txq *ltxq;
+ 
++		if (sta->txq[tid] == NULL)
++			continue;
+ 		ltxq = TXQ_TO_LTXQ(sta->txq[tid]);
+ 		LKPI_80211_LTXQ_LOCK_DESTROY(ltxq);
+-		free(sta->txq[tid], M_LKPI80211);
++		free(ltxq, M_LKPI80211);
+ 	}
+ 	free(lsta, M_LKPI80211);
+ 	return (NULL);
+@@ -1162,7 +1164,10 @@ lkpi_lsta_alloc(struct ieee80211vap *vap, const uint8_t mac[IEEE80211_ADDR_LEN],
+ static void
+ lkpi_lsta_free(struct lkpi_sta *lsta, struct ieee80211_node *ni)
+ {
++	struct lkpi_hw *lhw;
++	struct ieee80211_sta *sta;
+ 	struct mbuf *m;
++	int tid;
+ 
+ 	if (lsta->added_to_drv)
+ 		panic("%s: Trying to free an lsta still known to firmware: "
+@@ -1197,6 +1202,37 @@ lkpi_lsta_free(struct lkpi_sta *lsta, struct ieee80211_node *ni)
+ 	    __func__, lsta, mbufq_len(&lsta->txq)));
+ 	LKPI_80211_LSTA_TXQ_LOCK_DESTROY(lsta);
+ 
++	/* Unschedule, purge and free the per-TID txqs from lkpi_lsta_alloc(). */
++	lhw = HW_TO_LHW(lsta->hw);
++	sta = LSTA_TO_STA(lsta);
++	for (tid = 0; tid < nitems(sta->txq); tid++) {
++		struct lkpi_txq *ltxq;
++		struct sk_buff *skb;
++
++		if (sta->txq[tid] == NULL)
++			continue;
++		ltxq = TXQ_TO_LTXQ(sta->txq[tid]);
++
++		spin_lock_bh(&lhw->txq_scheduled_lock[ltxq->txq.ac]);
++		if (ltxq->txq_entry.tqe_prev != NULL)
++			TAILQ_REMOVE(&lhw->txq_scheduled[ltxq->txq.ac], ltxq,
++			    txq_entry);
++		spin_unlock_bh(&lhw->txq_scheduled_lock[ltxq->txq.ac]);
++
++		for (;;) {
++			LKPI_80211_LTXQ_LOCK(ltxq);
++			skb = skb_dequeue(&ltxq->skbq);
++			LKPI_80211_LTXQ_UNLOCK(ltxq);
++			if (skb == NULL)
++				break;
++			ieee80211_free_txskb(lsta->hw, skb);
++		}
++
++		LKPI_80211_LTXQ_LOCK_DESTROY(ltxq);
++		sta->txq[tid] = NULL;
++		free(ltxq, M_LKPI80211);
++	}
++
+ 	/* Remove lsta from vif; that is done by the state machine.  Should assert it? */
+ 
+ 	IMPROVE("Make sure everything is cleaned up.");
+-- 
+2.56.0
+
