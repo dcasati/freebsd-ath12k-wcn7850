@@ -6,7 +6,7 @@ These are hardware results for the series in `patches/`, plus the separate Linux
 
 | | |
 |---|---|
-| Host | FreeBSD 15.1-STABLE amd64, Qualcomm WCN7850 hw2.0, firmware WLAN.HMT.1.1.c7-00108 |
+| Host | Lenovo ThinkPad T14s Gen 6, FreeBSD 15.1-STABLE amd64, Qualcomm WCN7850 hw2.0, firmware WLAN.HMT.1.1.c7-00108 |
 | Kernels | `kernel.ath12k-vht80` (`stable-15` 0001-0008 + `local`), `kernel.ath12k-txqleak` (the same + the LinuxKPI txq fix) |
 | Access point | GL.iNet GL-MT3000 (MT7981, OpenWrt 21.02 GL firmware), WPA2-PSK CCMP |
 | Links | 5 GHz channel 36, VHT80, 2 spatial streams. 2.4 GHz channel 1, HT20 |
