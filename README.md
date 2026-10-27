@@ -16,14 +16,15 @@ manual page changes, and has been build-tested.
 
 More diagrams are in [docs/figures](docs/figures/).
 
-## How this was made, and what is asked
+## How this was made, and what I am asking
 
-The author is a long-time FreeBSD user, not a kernel developer. Most of
-the code was written with an AI coding assistant (GitHub Copilot) under
-his direction; he ran all hardware tests. Treat this as a working proof
-of concept and a reference, not as commit-ready code. Feedback, review
-of the design questions in [DEVELOPER-NOTES.md](DEVELOPER-NOTES.md),
-and testing on other hardware are welcome.
+I am a long-time FreeBSD user, not a kernel developer. Most of this
+code was written with an AI coding assistant (GitHub Copilot) under my
+direction, and I ran all of the hardware tests. Please treat it as a
+working proof of concept and a reference, not as commit-ready code. I
+would welcome feedback, review of the design questions in
+[DEVELOPER-NOTES.md](DEVELOPER-NOTES.md), and testing on other
+hardware.
 
 ## What's here
 
@@ -172,7 +173,7 @@ beyond `#include` lines and Linux API calls; this rules out verbatim
 copying, not paraphrase.
 
 **AI assistance:** most of this code was written with an AI coding
-assistant (GitHub Copilot) under the author's direction, and is shared
-under the licenses above. The FreeBSD Project has not yet published a
-policy on AI-assisted contributions; this work will follow it once it
+assistant (GitHub Copilot) under my direction, and I share it under
+the licenses above. The FreeBSD Project has not yet published a
+policy on AI-assisted contributions; I will follow it once it
 exists.

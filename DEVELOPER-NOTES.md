@@ -2,9 +2,9 @@
 
 Detail behind the freebsd-wireless RFC email. See the README for the
 license and AI-assistance notes. The code was written by an AI coding
-assistant (GitHub Copilot) under the direction of a FreeBSD user who is
-not a kernel developer. The questions below came out of that work;
-they are offered to reviewers as open points, not as settled designs.
+assistant (GitHub Copilot) under my direction; I am a FreeBSD user, not
+a kernel developer. The questions below came out of that work; I offer
+them to reviewers as open points, not as settled designs.
 
 ```
 Hardware and setup
