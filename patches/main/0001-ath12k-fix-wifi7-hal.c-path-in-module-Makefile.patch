@@ -1,5 +1,5 @@
-From 1afa23d278b9881c2371c9890e3dfeb68989f932 Mon Sep 17 00:00:00 2001
-From: dcasati <dcasati@users.noreply.github.com>
+From 2aefc43131fdf7dfe11aaa3a580c67e9c5e3c850 Mon Sep 17 00:00:00 2001
+From: Diego Casati <diego.casati@gmail.com>
 Date: Fri, 23 Oct 2026 15:00:37 -0600
 Subject: [PATCH 01/10] ath12k: fix wifi7/hal.c path in module Makefile
 
@@ -7,7 +7,7 @@ SRCS referenced wifif/hal.c, which does not exist.  The module is not
 yet connected to sys/modules/Makefile, so this went unnoticed; fix the
 path so the module can be built once the remaining support is in place.
 
-Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Diego Casati <diego.casati@gmail.com>
 ---
  sys/modules/ath12k/Makefile | 2 +-
  1 file changed, 1 insertion(+), 1 deletion(-)

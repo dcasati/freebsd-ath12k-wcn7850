@@ -1,5 +1,5 @@
-From 25fe9cbf6d3e89b9be87c2465704070c3551a107 Mon Sep 17 00:00:00 2001
-From: dcasati <dcasati@users.noreply.github.com>
+From f3f97e623568123343602bb6da1589f0848877c3 Mon Sep 17 00:00:00 2001
+From: Diego Casati <diego.casati@gmail.com>
 Date: Fri, 23 Oct 2026 14:44:31 -0600
 Subject: [PATCH 11/14] amd64: add ATH12KHOST and ATH12KLAB kernel configs
 
@@ -7,7 +7,7 @@ GENERIC plus INVARIANTS/WITNESS for ath12k bring-up.
 
 Local only; not intended for upstream.
 
-Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Diego Casati <diego.casati@gmail.com>
 ---
  sys/amd64/conf/ATH12KHOST | 7 +++++++
  sys/amd64/conf/ATH12KLAB  | 7 +++++++

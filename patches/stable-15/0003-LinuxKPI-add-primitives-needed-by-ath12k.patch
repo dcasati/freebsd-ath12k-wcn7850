@@ -1,5 +1,5 @@
-From 6c7a00dc94961460e1560988f1b165d22e7c3bc5 Mon Sep 17 00:00:00 2001
-From: dcasati <dcasati@users.noreply.github.com>
+From c0839d6e89e14608879ef2c92ee8bd30e480c79b Mon Sep 17 00:00:00 2001
+From: Diego Casati <diego.casati@gmail.com>
 Date: Fri, 23 Oct 2026 14:44:30 -0600
 Subject: [PATCH 03/10] LinuxKPI: add primitives needed by ath12k
 
@@ -8,7 +8,7 @@ additions to the barrier, interrupt, list, pci, pm, slab, socket and
 spinlock headers.  These are needed to build ath12k and are otherwise
 self-contained.
 
-Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Diego Casati <diego.casati@gmail.com>
 ---
  .../linuxkpi/common/include/asm/barrier.h     |   4 +
  .../linuxkpi/common/include/linux/interrupt.h |   6 +

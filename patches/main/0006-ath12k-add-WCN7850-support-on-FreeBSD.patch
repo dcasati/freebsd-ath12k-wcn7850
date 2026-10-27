@@ -1,5 +1,5 @@
-From 8d48f551119c3372096f90184832415bc9910977 Mon Sep 17 00:00:00 2001
-From: dcasati <dcasati@users.noreply.github.com>
+From c62fd337bbd0b30e8965c9c0fcc757bc12d37542 Mon Sep 17 00:00:00 2001
+From: Diego Casati <diego.casati@gmail.com>
 Date: Fri, 23 Oct 2026 14:44:31 -0600
 Subject: [PATCH 06/10] ath12k: add WCN7850 support on FreeBSD
 
@@ -29,7 +29,7 @@ CONFIG_ATH12K_AHB apply only to FreeBSD.
 
 Tested on WCN7850 hw2.0 with WPA2-PSK on 2.4 GHz and 5 GHz (VHT80).
 
-Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Diego Casati <diego.casati@gmail.com>
 ---
  sys/contrib/dev/athk/ath12k/ce.c           |  43 ++
  sys/contrib/dev/athk/ath12k/ce.h           |   8 +

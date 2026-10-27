@@ -1,5 +1,5 @@
-From 8b01aa9eebaf5eb7cd569f41ae7ffdf1c75bc543 Mon Sep 17 00:00:00 2001
-From: dcasati <dcasati@users.noreply.github.com>
+From 210d6f2321b62f9e19d47a9ad35bc872fa3d6022 Mon Sep 17 00:00:00 2001
+From: Diego Casati <diego.casati@gmail.com>
 Date: Fri, 23 Oct 2026 14:44:29 -0600
 Subject: [PATCH 02/10] net80211: add optional controlled-port authorize hook
 
@@ -12,7 +12,7 @@ controlled port is open.
 
 Drivers that do not set the hook see no change in behaviour.
 
-Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Diego Casati <diego.casati@gmail.com>
 ---
  sys/net80211/ieee80211_freebsd.c | 5 ++++-
  sys/net80211/ieee80211_node.c    | 5 +++++

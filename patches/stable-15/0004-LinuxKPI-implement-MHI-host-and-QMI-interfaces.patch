@@ -1,5 +1,5 @@
-From 5b73f8b7ebf3817457daba5f182f92c07be17b47 Mon Sep 17 00:00:00 2001
-From: dcasati <dcasati@users.noreply.github.com>
+From 86e313f2a61156e45470d74d03fcee8aa95dc6de Mon Sep 17 00:00:00 2001
+From: Diego Casati <diego.casati@gmail.com>
 Date: Fri, 23 Oct 2026 14:44:30 -0600
 Subject: [PATCH 04/10] LinuxKPI: implement MHI host and QMI interfaces
 
@@ -14,7 +14,7 @@ consumer is installed, sends HELLO once the IPCR channels are up and
 detaches at unprepare once DMA is released.  Service lookup is global,
 as in Linux.
 
-Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Diego Casati <diego.casati@gmail.com>
 ---
  .../linuxkpi/common/include/linux/mhi.h       |   63 +-
  .../common/include/linux/soc/qcom/qmi.h       |   84 +-

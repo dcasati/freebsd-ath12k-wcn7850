@@ -1,5 +1,5 @@
-From a4156068b5e0724efe53b5389b3b93f07a0757a6 Mon Sep 17 00:00:00 2001
-From: dcasati <dcasati@users.noreply.github.com>
+From fe64353475fc6e98273ef41c24872712681a1bdc Mon Sep 17 00:00:00 2001
+From: Diego Casati <diego.casati@gmail.com>
 Date: Tue, 27 Oct 2026 12:25:48 -0600
 Subject: [PATCH 10/10] ath12k: fix ATH12K_DEBUGFS build on FreeBSD
 
@@ -7,7 +7,7 @@ u64 is unsigned long on FreeBSD/LP64 rather than unsigned long long as
 on Linux; cast the dlpager page timestamp for the %llu format to fix the
 -Wformat error when building with ATH12K_DEBUGFS.
 
-Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Diego Casati <diego.casati@gmail.com>
 ---
  sys/contrib/dev/athk/ath12k/debugfs_htt_stats.c | 5 +++++
  1 file changed, 5 insertions(+)

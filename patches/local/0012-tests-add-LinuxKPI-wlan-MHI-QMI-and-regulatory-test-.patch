@@ -1,5 +1,5 @@
-From 8dd5c1b13ead74d3ba823148d72848e509f6fee0 Mon Sep 17 00:00:00 2001
-From: dcasati <dcasati@users.noreply.github.com>
+From c44b3b5550e4918d694f922c8d7efc4e3e738ba8 Mon Sep 17 00:00:00 2001
+From: Diego Casati <diego.casati@gmail.com>
 Date: Fri, 23 Oct 2026 14:44:31 -0600
 Subject: [PATCH 12/14] tests: add LinuxKPI wlan, MHI, QMI and regulatory test
  harnesses
@@ -12,7 +12,7 @@ unmodified.
 Local only.  Candidates for conversion to ktest(9) with ATF wrappers
 before going upstream.
 
-Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Diego Casati <diego.casati@gmail.com>
 ---
  sys/modules/tests/linuxkpi_mhi/Makefile       |   16 +
  sys/modules/tests/linuxkpi_mhi_boot/Makefile  |   14 +

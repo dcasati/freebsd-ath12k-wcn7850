@@ -1,5 +1,5 @@
-From 596333bdf8d62fd505f87087c45ae09fe95596aa Mon Sep 17 00:00:00 2001
-From: dcasati <dcasati@users.noreply.github.com>
+From bb9c185713b9da91fdf9c1f083a1b5ea2449d65d Mon Sep 17 00:00:00 2001
+From: Diego Casati <diego.casati@gmail.com>
 Date: Tue, 27 Oct 2026 12:32:39 -0600
 Subject: [PATCH 13/14] tests: hook LinuxKPI wlan test modules into Kyua
 
@@ -49,7 +49,7 @@ atf_python/pytest over netlink, which would make python3 and pytest
 mandatory and requires restructuring every module into ktest cases.
 That remains the path for upstreaming.
 
-Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Diego Casati <diego.casati@gmail.com>
 ---
  etc/mtree/BSD.tests.dist                    |   4 +
  tests/sys/Makefile                          |   1 +

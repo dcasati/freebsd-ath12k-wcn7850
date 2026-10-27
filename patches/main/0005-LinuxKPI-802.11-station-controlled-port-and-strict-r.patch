@@ -1,5 +1,5 @@
-From 5d6e3718ccbd02d3ee7b49098be5bc4bacc10765 Mon Sep 17 00:00:00 2001
-From: dcasati <dcasati@users.noreply.github.com>
+From e6e09cd3fb85cd8d07c7d6c1d80a3c320367cd67 Mon Sep 17 00:00:00 2001
+From: Diego Casati <diego.casati@gmail.com>
 Date: Fri, 23 Oct 2026 14:44:30 -0600
 Subject: [PATCH 05/10] LinuxKPI: 802.11 station controlled port and strict
  regulatory
@@ -24,7 +24,7 @@ Subject: [PATCH 05/10] LinuxKPI: 802.11 station controlled port and strict
 
 Drivers that do not opt in keep their current behaviour.
 
-Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Diego Casati <diego.casati@gmail.com>
 ---
  .../linuxkpi/common/include/linux/ieee80211.h |   23 +-
  .../linuxkpi/common/include/net/cfg80211.h    |  286 ++--

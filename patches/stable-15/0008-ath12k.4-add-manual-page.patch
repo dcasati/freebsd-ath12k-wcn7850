@@ -1,5 +1,5 @@
-From c37d37cabae30727f529cdd0bb6ff77e5d33c50f Mon Sep 17 00:00:00 2001
-From: dcasati <dcasati@users.noreply.github.com>
+From 7658f5e29c026edeee942fec947e1ce33a1a9d6f Mon Sep 17 00:00:00 2001
+From: Diego Casati <diego.casati@gmail.com>
 Date: Mon, 26 Oct 2026 13:01:02 -0600
 Subject: [PATCH 08/10] ath12k.4: add manual page
 
@@ -13,7 +13,7 @@ linuxkpi_wlan.4.
 Like ath10k.4, the page is not yet hooked up in man4/Makefile, as the
 module is not built from sys/modules/Makefile.
 
-Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Diego Casati <diego.casati@gmail.com>
 ---
  share/man/man4/ath12k.4        | 156 +++++++++++++++++++++++++++++++++
  share/man/man4/linuxkpi_wlan.4 |   2 +

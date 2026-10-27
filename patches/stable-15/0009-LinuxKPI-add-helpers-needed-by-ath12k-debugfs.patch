@@ -1,5 +1,5 @@
-From b6e32a5608c68f3a8d5b170995d742bcc1131127 Mon Sep 17 00:00:00 2001
-From: dcasati <dcasati@users.noreply.github.com>
+From c820203f05d608687e94a2e010e7a81d61fd7ad6 Mon Sep 17 00:00:00 2001
+From: Diego Casati <diego.casati@gmail.com>
 Date: Tue, 27 Oct 2026 12:25:47 -0600
 Subject: [PATCH 09/10] LinuxKPI: add helpers needed by ath12k debugfs
 
@@ -22,7 +22,7 @@ Linux a NULL parent refers to the debugfs root (as for the other
 debugfs_create_*() functions).  ath11k and ath12k both look up their
 top-level directory that way.
 
-Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Diego Casati <diego.casati@gmail.com>
 ---
  sys/compat/lindebugfs/lindebugfs.c            |  5 ++-
  .../linuxkpi/common/include/linux/cleanup.h   | 12 ++++++

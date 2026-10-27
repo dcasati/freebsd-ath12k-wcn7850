@@ -1,5 +1,5 @@
-From 1594c3c137137e6411ad1f32c2a93aa4cf3c96bc Mon Sep 17 00:00:00 2001
-From: dcasati <dcasati@users.noreply.github.com>
+From d7a8350b3e094f097a3785a936d36274e63a62b7 Mon Sep 17 00:00:00 2001
+From: Diego Casati <diego.casati@gmail.com>
 Date: Thu, 22 Oct 2026 20:57:22 -0600
 Subject: [PATCH 14/14] tools: add rc.d script for ath12k wlan0 bring-up
 
@@ -22,7 +22,7 @@ wpa_supplicant.  No new rc.conf variables.
 Local workaround only; the real fix belongs in the rc.d network
 scripts.
 
-Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Signed-off-by: Diego Casati <diego.casati@gmail.com>
 ---
  tools/tools/ath12k/ath12k_wlan.rc | 133 ++++++++++++++++++++++++++++++
  1 file changed, 133 insertions(+)
